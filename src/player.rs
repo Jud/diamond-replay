@@ -97,6 +97,12 @@ impl PlayerTracker {
             .insert(player_id.to_string(), team_id.to_string());
     }
 
+    /// Record a player-to-team mapping from a `fill_lineup` event (no index).
+    pub fn handle_fill_lineup_roster(&mut self, team_id: &str, player_id: &str) {
+        self.player_team
+            .insert(player_id.to_string(), team_id.to_string());
+    }
+
     pub fn handle_fill_position(&mut self, team_id: &str, player_id: &str, position: &str) {
         self.player_team
             .insert(player_id.to_string(), team_id.to_string());
@@ -315,6 +321,36 @@ impl PlayerTracker {
                 .pitching
                 .get_or_insert_with(PitchingStats::default);
             p.runs_allowed += 1;
+        }
+    }
+
+    /// Remove runs from players on a team when a score override reduces the total.
+    /// Removes from the last players first (reverse insertion order approximation).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a player ID found in iteration is missing from the stats map
+    /// (should never happen since the IDs are drawn from the same map).
+    pub fn adjust_team_runs(&mut self, team_id: &str, delta: i32) {
+        if delta >= 0 {
+            return;
+        }
+        let mut remaining = -delta;
+        let mut ids: Vec<String> = self
+            .stats
+            .iter()
+            .filter(|(_, s)| s.team_id == team_id && s.baserunning.runs > 0)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.reverse();
+        for id in ids {
+            if remaining == 0 {
+                break;
+            }
+            let runs = &mut self.stats.get_mut(&id).unwrap().baserunning.runs;
+            let take = (*runs).min(remaining);
+            *runs -= take;
+            remaining -= take;
         }
     }
 

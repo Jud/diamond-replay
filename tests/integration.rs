@@ -58,6 +58,30 @@ macro_rules! game_test {
                 "{} home runs_total mismatch",
                 $game_key
             );
+
+            // Verify player runs sum == linescore total for both teams
+            let away_player_runs: i32 = result
+                .player_stats
+                .values()
+                .filter(|p| p.team_id == result.away_id)
+                .map(|p| p.baserunning.runs)
+                .sum();
+            let home_player_runs: i32 = result
+                .player_stats
+                .values()
+                .filter(|p| p.team_id == result.home_id)
+                .map(|p| p.baserunning.runs)
+                .sum();
+            assert_eq!(
+                away_player_runs, away_total,
+                "{} away player runs mismatch: player_sum={}, linescore={}",
+                $game_key, away_player_runs, away_total
+            );
+            assert_eq!(
+                home_player_runs, home_total,
+                "{} home player runs mismatch: player_sum={}, linescore={}",
+                $game_key, home_player_runs, home_total
+            );
         }
     };
 }
@@ -123,15 +147,14 @@ fn test_player_stats_populated() {
         .map(|p| p.batting.pa)
         .sum();
 
-    eprintln!(
-        "Away team PA: team={}, players={}",
-        result.away_batting.pa, away_player_pa
+    assert_eq!(
+        away_player_pa, result.away_batting.pa,
+        "Away player PA sum should match team total"
     );
-    eprintln!(
-        "Home team PA: team={}, players={}",
-        result.home_batting.pa, home_player_pa
+    assert_eq!(
+        home_player_pa, result.home_batting.pa,
+        "Home player PA sum should match team total"
     );
-    eprintln!("Total players with stats: {}", result.player_stats.len());
 
     // Player runs should sum to linescore
     let away_runs: i32 = result
@@ -148,12 +171,12 @@ fn test_player_stats_populated() {
         .sum();
     let away_ls: i32 = result.linescore_away.iter().sum();
     let home_ls: i32 = result.linescore_home.iter().sum();
-    eprintln!(
-        "Away runs: linescore={}, player_baserunning={}",
-        away_ls, away_runs
+    assert_eq!(
+        away_runs, away_ls,
+        "Away player runs should match linescore total"
     );
-    eprintln!(
-        "Home runs: linescore={}, player_baserunning={}",
-        home_ls, home_runs
+    assert_eq!(
+        home_runs, home_ls,
+        "Home player runs should match linescore total"
     );
 }

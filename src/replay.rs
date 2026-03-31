@@ -77,12 +77,14 @@ impl Replay {
     fn resolve(&mut self, discard: bool) {
         if let Some(pending) = self.state.pending.take() {
             let explicit = self.state.explicit_br_runners.clone();
+            let handled = self.state.handled_bases.clone();
             let defense = self.defense_team().to_string();
             let scored = resolve::resolve_pending(
                 self.hi(),
                 &pending,
                 &mut self.state.bases,
                 &explicit,
+                &handled,
                 &mut self.runs_by_half,
                 &mut self.half_stats,
             );
@@ -95,6 +97,7 @@ impl Replay {
         }
         if discard {
             self.state.explicit_br_runners.clear();
+            self.state.handled_bases.clear();
         }
     }
 
@@ -159,6 +162,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let hi = r.hi();
     let offense = r.state.offense.clone();
     let defense = r.defense_team().to_string();
+    let batter_id = r.players.current_batter(&offense).map(str::to_string);
     r.ensure_hi_stats();
     r.half_stats[hi].pitches += 1;
     r.state.pitches_since_last_bip += 1;
@@ -175,7 +179,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
                 r.half_stats[hi].bb += 1;
                 r.half_stats[hi].pa += 1;
                 record_walk_run(r, hi, &defense);
-                score::apply_walk_bases(&mut r.state.bases);
+                score::apply_walk_bases(&mut r.state.bases, batter_id.as_deref());
                 r.state.reset_count();
                 r.players.record_bb(&offense);
                 r.players.record_pitch_bb(&defense);
@@ -207,7 +211,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             r.half_stats[hi].hbp += 1;
             r.half_stats[hi].pa += 1;
             record_walk_run(r, hi, &defense);
-            score::apply_walk_bases(&mut r.state.bases);
+            score::apply_walk_bases(&mut r.state.bases, batter_id.as_deref());
             r.state.reset_count();
             r.players.record_hbp(&offense);
             r.players.record_pitch_hbp(&defense);
@@ -305,8 +309,10 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
                 cause: None,
                 snapshot,
                 outs_after_play: r.state.outs,
+                batter_id: batter_id.clone(),
             });
             r.state.explicit_br_runners.clear();
+            r.state.handled_bases.clear();
         }
         return r.state.outs >= 3;
     }
@@ -340,8 +346,10 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             cause,
             snapshot,
             outs_after_play: r.state.outs,
+            batter_id,
         });
         r.state.explicit_br_runners.clear();
+        r.state.handled_bases.clear();
     }
     false
 }
@@ -374,23 +382,54 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     }
 
     if pt.is_out() {
-        r.state.outs += 1;
+        // Record handled_bases before clearing the runner.
+        // Try snapshot first, then current bases.
         if let (Some(ref rid), Some(b)) = (&runner_id, base) {
+            if let Some(ref pending) = r.state.pending {
+                if let Some(origin) = pending
+                    .snapshot
+                    .find_by_id(rid)
+                    .or_else(|| r.state.bases.find_by_id(rid))
+                {
+                    r.state.handled_bases.insert(origin);
+                }
+            }
+            r.state.outs += 1;
             r.state.bases.clear_runner(rid, b);
+        } else {
+            r.state.outs += 1;
         }
         return r.state.outs >= 3;
     }
 
     if let (Some(b), Some(ref rid)) = (base, &runner_id) {
         if pt == BrPlayType::RemainedOnLastPlay && (1..=3).contains(&b) {
-            // Sync snapshot so already_handled sees re-identification, not movement
-            if let Some(ref mut pending) = r.state.pending {
-                pending
+            // Record the runner's snapshot origin as handled (may differ from b).
+            // Only mark the snapshot origin — not the destination — so we don't
+            // accidentally suppress a different snapshot occupant at base b.
+            if let Some(ref pending) = r.state.pending {
+                if let Some(origin) = pending
                     .snapshot
-                    .set(b, Some(BaseOccupant::Player(rid.clone())));
+                    .find_by_id(rid)
+                    .or_else(|| r.state.bases.find_by_id(rid))
+                {
+                    r.state.handled_bases.insert(origin);
+                }
             }
             update_remained(&mut r.state, b, rid);
         } else {
+            // Record handled_bases before clearing the runner.
+            // Try snapshot first (runner was placed by ID), then current bases
+            // (runner may have been Anonymous in snapshot but identified since).
+            if let Some(ref pending) = r.state.pending {
+                if let Some(origin) = pending
+                    .snapshot
+                    .find_by_id(rid)
+                    .or_else(|| r.state.bases.find_by_id(rid))
+                {
+                    r.state.handled_bases.insert(origin);
+                }
+            }
             r.state.bases.clear_runner(rid, b);
             if b == 4 {
                 score::score_run(
@@ -462,15 +501,24 @@ fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
         let hi = r.hi();
         let offense = r.state.offense.clone();
         let defense = r.defense_team().to_string();
+        let batter_id = r.players.current_batter(&offense).map(str::to_string);
         r.ensure_hi_stats();
         r.half_stats[hi].hbp += 1;
         r.half_stats[hi].pa += 1;
         record_walk_run(r, hi, &defense);
-        score::apply_walk_bases(&mut r.state.bases);
+        score::apply_walk_bases(&mut r.state.bases, batter_id.as_deref());
         r.state.reset_count();
         r.players.record_hbp(&offense);
         r.players.record_pitch_hbp(&defense);
     }
+}
+
+/// Compute the total runs for a team from `runs_by_half`.
+fn team_run_total(runs_by_half: &HashMap<usize, i32>, half_inning: usize, parity: usize) -> i32 {
+    (parity..=half_inning)
+        .step_by(2)
+        .map(|hi| runs_by_half.get(&hi).copied().unwrap_or(0))
+        .sum()
 }
 
 fn handle_override(r: &mut Replay, attrs: &serde_json::Value) {
@@ -487,14 +535,34 @@ fn handle_override(r: &mut Replay, attrs: &serde_json::Value) {
                 })
             })
             .collect();
+
+        // Capture per-team run totals before the override
+        let hi = r.hi();
+        let away_before = team_run_total(&r.runs_by_half, hi, 0);
+        let home_before = team_run_total(&r.runs_by_half, hi, 1);
+
         score::apply_score_override(
-            r.hi(),
+            hi,
             &r.state.home_id,
             &r.state.away_id,
             &mut r.runs_by_half,
             &mut r.half_stats,
             &entries,
         );
+
+        // Check if runs were reduced and adjust player stats accordingly
+        let away_after = team_run_total(&r.runs_by_half, hi, 0);
+        let home_after = team_run_total(&r.runs_by_half, hi, 1);
+        let away_id = r.state.away_id.clone();
+        let home_id = r.state.home_id.clone();
+        if away_after < away_before {
+            r.players
+                .adjust_team_runs(&away_id, away_after - away_before);
+        }
+        if home_after < home_before {
+            r.players
+                .adjust_team_runs(&home_id, home_after - home_before);
+        }
     }
 
     if let Some(half) = attr_str(attrs, "half") {
@@ -622,6 +690,15 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                         attr_usize(&evt.attributes, "index"),
                     ) {
                         r.players.handle_fill_lineup(tid, pid, idx);
+                    }
+                    false
+                }
+                "fill_lineup" => {
+                    if let (Some(tid), Some(pid)) = (
+                        attr_str(&evt.attributes, "teamId"),
+                        attr_str(&evt.attributes, "playerId"),
+                    ) {
+                        r.players.handle_fill_lineup_roster(tid, pid);
                     }
                     false
                 }

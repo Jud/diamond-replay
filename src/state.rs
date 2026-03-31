@@ -85,7 +85,21 @@ impl BaseState {
         false
     }
 
-    /// Clear an anonymous runner from the expected origin base.
+    /// Find which base (1-3) a player occupies by their ID.
+    #[must_use]
+    pub fn find_by_id(&self, id: &str) -> Option<usize> {
+        for b in 0..3 {
+            if let Some(occ) = &self.bases[b] {
+                if occ.is_player(id) {
+                    return Some(b + 1);
+                }
+            }
+        }
+        None
+    }
+
+    /// Clear a runner from the expected origin base.
+    /// Two-pass: first prefers an Anonymous occupant, then falls back to any occupant.
     pub fn clear_fallback(&mut self, dest_base: usize) -> bool {
         if !(2..=4).contains(&dest_base) {
             return false;
@@ -97,15 +111,23 @@ impl BaseState {
                 search.push(b);
             }
         }
-        for b in search {
+        // Pass 1: prefer Anonymous occupant
+        for &b in &search {
             if (1..=3).contains(&b)
                 && self.bases[b - 1]
                     .as_ref()
                     .is_some_and(BaseOccupant::is_anonymous)
-                {
-                    self.bases[b - 1] = None;
-                    return true;
-                }
+            {
+                self.bases[b - 1] = None;
+                return true;
+            }
+        }
+        // Pass 2: any occupant
+        for &b in &search {
+            if (1..=3).contains(&b) && self.bases[b - 1].is_some() {
+                self.bases[b - 1] = None;
+                return true;
+            }
         }
         false
     }
@@ -129,6 +151,8 @@ pub struct PendingImplicit {
     pub cause: Option<BipCause>,
     pub snapshot: BaseState,
     pub outs_after_play: i32,
+    /// The batter who produced this play — used to place Player(id) instead of Anonymous.
+    pub batter_id: Option<String>,
 }
 
 /// Core mutable game state.
@@ -146,6 +170,8 @@ pub struct GameState {
     pub bases: BaseState,
     pub pending: Option<PendingImplicit>,
     pub explicit_br_runners: HashSet<String>,
+    /// Bases whose occupants were explicitly handled by `base_running` events.
+    pub handled_bases: HashSet<usize>,
 }
 
 impl Default for GameState {
@@ -170,6 +196,7 @@ impl GameState {
             bases: BaseState::new(),
             pending: None,
             explicit_br_runners: HashSet::new(),
+            handled_bases: HashSet::new(),
         }
     }
 
@@ -189,6 +216,7 @@ impl GameState {
         self.outs = 0;
         self.reset_count();
         self.bases.clear_all();
+        self.handled_bases.clear();
     }
 
     #[must_use]
