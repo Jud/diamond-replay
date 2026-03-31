@@ -97,10 +97,11 @@ impl PlayerTracker {
             .insert(player_id.to_string(), team_id.to_string());
     }
 
-    /// Record a player-to-team mapping from a `fill_lineup` event (no index).
+    /// Record a player from a `fill_lineup` event (no explicit index).
+    /// Assigns the next sequential lineup slot for the team.
     pub fn handle_fill_lineup_roster(&mut self, team_id: &str, player_id: &str) {
-        self.player_team
-            .insert(player_id.to_string(), team_id.to_string());
+        let next_idx = self.lineup_size.get(team_id).copied().unwrap_or(0);
+        self.handle_fill_lineup(team_id, player_id, next_idx);
     }
 
     pub fn handle_fill_position(&mut self, team_id: &str, player_id: &str, position: &str) {
