@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
 
-use crate::event::{BipCause, BipPlayType, PlayResult};
+use crate::event::{BipCause, PlayResult};
 use crate::score;
 use crate::state::{BaseOccupant, BaseState, PendingImplicit};
 use crate::stats::RawStats;
@@ -107,19 +107,16 @@ fn resolve_triple(cx: &mut Ctx<'_, impl BuildHasher, impl BuildHasher, impl Buil
 }
 
 fn resolve_double(cx: &mut Ctx<'_, impl BuildHasher, impl BuildHasher, impl BuildHasher>) {
+    // GC auto-advance: runners from 2B and 3B score, runner from 1B to 3B.
     cx.score_if_live(3);
     cx.score_if_live(2);
     cx.advance_if_live(1, 3);
     cx.bases.set(2, Some(cx.batter_occupant()));
 }
 
-fn resolve_single(
-    cx: &mut Ctx<'_, impl BuildHasher, impl BuildHasher, impl BuildHasher>,
-    is_fly: bool,
-) {
-    if !is_fly {
-        cx.score_if_live(3);
-    }
+fn resolve_single(cx: &mut Ctx<'_, impl BuildHasher, impl BuildHasher, impl BuildHasher>) {
+    // GC rule: runners advance 1 base (regardless of fly/ground).
+    cx.score_if_live(3);
     cx.advance_if_live(2, 3);
     cx.advance_if_live(1, 2);
     cx.bases.set(1, Some(cx.batter_occupant()));
@@ -204,7 +201,7 @@ pub fn resolve_pending<S: BuildHasher, S2: BuildHasher, S3: BuildHasher>(
         PlayResult::Triple => resolve_triple(&mut cx),
         PlayResult::Double => resolve_double(&mut cx),
         PlayResult::Single => {
-            resolve_single(&mut cx, pending.play_type == Some(BipPlayType::FlyBall));
+            resolve_single(&mut cx);
         }
         PlayResult::BatterOutAdvanceRunners
         | PlayResult::SacrificeFly
