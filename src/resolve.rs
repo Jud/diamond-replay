@@ -45,15 +45,14 @@ impl<S: BuildHasher, S2: BuildHasher, S3: BuildHasher> Ctx<'_, S, S2, S3> {
         already_handled(base, self.snap, self.explicit, self.handled_bases)
     }
 
-    /// Returns `Player(id)` if a batter ID is known and that player is NOT
-    /// already occupying a base; otherwise returns `Anonymous`.
+    /// Returns `Player(id)` for the batter. The same player may already
+    /// occupy another base (short lineup wrap) — that's fine, they still
+    /// get credit for reaching base on the new at-bat.
     fn batter_occupant(&self) -> BaseOccupant {
-        if let Some(id) = self.batter_id {
-            if self.bases.find_by_id(id).is_none() {
-                return BaseOccupant::Player(id.to_string());
-            }
+        match self.batter_id {
+            Some(id) => BaseOccupant::Player(id.to_string()),
+            None => BaseOccupant::Anonymous,
         }
-        BaseOccupant::Anonymous
     }
 
     fn score_bip(&mut self, base: usize) {
