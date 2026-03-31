@@ -5,6 +5,7 @@ use crate::event::{
     attr_bool, attr_i32, attr_str, attr_usize, BipCause, BipPlayType, BrPlayType, EventData,
     PitchResult, PlayResult, RawApiEvent,
 };
+use crate::player::{PlayerGameStats, PlayerTracker};
 use crate::resolve;
 use crate::score;
 use crate::state::{BaseOccupant, GameState, PendingImplicit};
@@ -25,6 +26,7 @@ pub struct GameResult {
     pub last_timestamp: Option<i64>,
     pub transition_gaps: Vec<f64>,
     pub dead_time_per_inning: Vec<f64>,
+    pub player_stats: HashMap<String, PlayerGameStats>,
 }
 
 // ---------------------------------------------------------------------------
@@ -38,6 +40,7 @@ struct Replay {
     half_first_ts: HashMap<usize, i64>,
     half_last_ts: HashMap<usize, i64>,
     all_ts: Vec<i64>,
+    players: PlayerTracker,
 }
 
 impl Replay {
@@ -49,6 +52,16 @@ impl Replay {
             half_first_ts: HashMap::new(),
             half_last_ts: HashMap::new(),
             all_ts: Vec::new(),
+            players: PlayerTracker::new(),
+        }
+    }
+
+    /// The team currently fielding (not batting).
+    fn defense_team(&self) -> &str {
+        if self.state.offense == self.state.away_id {
+            &self.state.home_id
+        } else {
+            &self.state.away_id
         }
     }
 
@@ -64,7 +77,8 @@ impl Replay {
     fn resolve(&mut self, discard: bool) {
         if let Some(pending) = self.state.pending.take() {
             let explicit = self.state.explicit_br_runners.clone();
-            resolve::resolve_pending(
+            let defense = self.defense_team().to_string();
+            let scored = resolve::resolve_pending(
                 self.hi(),
                 &pending,
                 &mut self.state.bases,
@@ -72,6 +86,12 @@ impl Replay {
                 &mut self.runs_by_half,
                 &mut self.half_stats,
             );
+            for pid in &scored {
+                if let Some(id) = pid {
+                    self.players.record_run(id);
+                }
+                self.players.record_pitch_run(&defense);
+            }
         }
         if discard {
             self.state.explicit_br_runners.clear();
@@ -89,6 +109,30 @@ impl Replay {
 // ---------------------------------------------------------------------------
 // Pitch handling — each outcome is its own function
 // ---------------------------------------------------------------------------
+
+/// Score from bases-loaded walk/HBP, recording the runner who scored.
+fn record_walk_run(r: &mut Replay, hi: usize, defense: &str) {
+    // Capture the runner at 3B before the bases change
+    let runner_3b = if r.state.bases.is_occupied(1)
+        && r.state.bases.is_occupied(2)
+        && r.state.bases.is_occupied(3)
+    {
+        match r.state.bases.get(3) {
+            Some(BaseOccupant::Player(id)) => Some(id.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let scored =
+        score::force_advance_walk_score(hi, &r.state.bases, &mut r.runs_by_half, &mut r.half_stats);
+    if scored {
+        if let Some(ref pid) = runner_3b {
+            r.players.record_run(pid);
+        }
+        r.players.record_pitch_run(defense);
+    }
+}
 
 fn handle_set_teams(r: &mut Replay, attrs: &serde_json::Value) {
     r.state.home_id = attr_str(attrs, "homeId").unwrap_or("").to_string();
@@ -113,9 +157,15 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     }
 
     let hi = r.hi();
+    let offense = r.state.offense.clone();
+    let defense = r.defense_team().to_string();
     r.ensure_hi_stats();
     r.half_stats[hi].pitches += 1;
     r.state.pitches_since_last_bip += 1;
+
+    // Record pitch for pitcher stats
+    let is_ball = result == PitchResult::Ball;
+    r.players.record_pitch_thrown(&defense, is_ball);
 
     match result {
         PitchResult::Ball => {
@@ -124,14 +174,11 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             if r.state.ball_count >= 4 {
                 r.half_stats[hi].bb += 1;
                 r.half_stats[hi].pa += 1;
-                score::force_advance_walk_score(
-                    hi,
-                    &r.state.bases,
-                    &mut r.runs_by_half,
-                    &mut r.half_stats,
-                );
+                record_walk_run(r, hi, &defense);
                 score::apply_walk_bases(&mut r.state.bases);
                 r.state.reset_count();
+                r.players.record_bb(&offense);
+                r.players.record_pitch_bb(&defense);
             }
             false
         }
@@ -159,14 +206,11 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         PitchResult::HitByPitch => {
             r.half_stats[hi].hbp += 1;
             r.half_stats[hi].pa += 1;
-            score::force_advance_walk_score(
-                hi,
-                &r.state.bases,
-                &mut r.runs_by_half,
-                &mut r.half_stats,
-            );
+            record_walk_run(r, hi, &defense);
             score::apply_walk_bases(&mut r.state.bases);
             r.state.reset_count();
+            r.players.record_hbp(&offense);
+            r.players.record_pitch_hbp(&defense);
             false
         }
         PitchResult::Unknown => false,
@@ -190,7 +234,8 @@ fn handle_strike(
 
     if r.state.strike_count >= 3 {
         r.half_stats[hi].k += 1;
-        if result == PitchResult::StrikeLooking {
+        let looking = result == PitchResult::StrikeLooking;
+        if looking {
             r.half_stats[hi].k_looking += 1;
         } else {
             r.half_stats[hi].k_swinging += 1;
@@ -198,6 +243,10 @@ fn handle_strike(
         r.half_stats[hi].pa += 1;
         r.state.outs += 1;
         r.state.reset_count();
+        let offense = r.state.offense.clone();
+        let defense = r.defense_team().to_string();
+        r.players.record_k(&offense, looking);
+        r.players.record_pitch_k(&defense);
         return r.state.outs >= 3;
     }
     false
@@ -212,16 +261,33 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     r.state.reset_count();
     let pr = PlayResult::parse(attr_str(attrs, "playResult").unwrap_or(""));
     let hi = r.hi();
+    let offense = r.state.offense.clone();
+    let defense = r.defense_team().to_string();
     r.ensure_hi_stats();
 
     if pr.is_dropped_third_strike() {
+        let looking = r.state.last_strike_type.as_deref() == Some("strike_looking");
         r.half_stats[hi].k += 1;
         r.half_stats[hi].pa += 1;
-        if r.state.last_strike_type.as_deref() == Some("strike_looking") {
+        if looking {
             r.half_stats[hi].k_looking += 1;
         } else {
             r.half_stats[hi].k_swinging += 1;
         }
+        r.players.record_dropped_k(&offense, looking);
+        r.players.record_pitch_k(&defense);
+    } else if !pr.is_batter_out() {
+        // Record the hit type for batter and pitcher
+        r.players.record_bip(&offense, pr);
+        if matches!(
+            pr,
+            PlayResult::Single | PlayResult::Double | PlayResult::Triple | PlayResult::HomeRun
+        ) {
+            r.players.record_pitch_hit(&defense, pr);
+        }
+    } else {
+        // Batter out on a batted ball — still a PA, advance the lineup
+        r.players.record_bip(&offense, pr);
     }
 
     let snapshot = r.state.bases.snapshot();
@@ -248,10 +314,19 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         for b in [1, 2, 3] {
             if snapshot.is_occupied(b) {
                 score::score_run(hi, &mut r.runs_by_half, &mut r.half_stats, true);
+                if let Some(BaseOccupant::Player(id)) = snapshot.get(b) {
+                    r.players.record_run(id);
+                }
+                r.players.record_pitch_run(&defense);
                 r.state.bases.set(b, None);
             }
         }
+        // Batter scores
         score::score_run(hi, &mut r.runs_by_half, &mut r.half_stats, true);
+        if let Some(batter) = r.players.current_batter(&offense).map(str::to_string) {
+            r.players.record_run(&batter);
+        }
+        r.players.record_pitch_run(&defense);
     } else if pr.sets_pending_implicit() {
         let (cause, play_type) = if pr == PlayResult::DroppedThirdStrike {
             (attr_str(attrs, "cause").map(BipCause::parse), None)
@@ -285,8 +360,17 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     }
 
     let hi = r.hi();
+    let defense = r.defense_team().to_string();
     r.ensure_hi_stats();
     record_br_stats(&mut r.half_stats[hi], pt, base);
+
+    // Record player baserunning stats
+    if let (Some(ref rid), Some(b)) = (&runner_id, base) {
+        r.players.record_baserunning(rid, pt, b);
+        if b == 4 && !pt.is_out() {
+            r.players.record_pitch_run(&defense);
+        }
+    }
 
     if pt.is_out() {
         r.state.outs += 1;
@@ -369,12 +453,16 @@ fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
     r.resolve(false);
     if attr_str(attrs, "reason") == Some("hit_by_pitch") {
         let hi = r.hi();
+        let offense = r.state.offense.clone();
+        let defense = r.defense_team().to_string();
         r.ensure_hi_stats();
         r.half_stats[hi].hbp += 1;
         r.half_stats[hi].pa += 1;
-        score::force_advance_walk_score(hi, &r.state.bases, &mut r.runs_by_half, &mut r.half_stats);
+        record_walk_run(r, hi, &defense);
         score::apply_walk_bases(&mut r.state.bases);
         r.state.reset_count();
+        r.players.record_hbp(&offense);
+        r.players.record_pitch_hbp(&defense);
     }
 }
 
@@ -424,6 +512,7 @@ fn handle_override(r: &mut Replay, attrs: &serde_json::Value) {
 // ---------------------------------------------------------------------------
 
 fn aggregate(replay: Replay) -> GameResult {
+    let player_stats = replay.players.into_stats();
     let num_hi = replay.half_stats.len();
     let mut away_batting = RawStats::new();
     let mut home_batting = RawStats::new();
@@ -459,6 +548,7 @@ fn aggregate(replay: Replay) -> GameResult {
         last_timestamp: replay.all_ts.iter().copied().max(),
         transition_gaps: gaps,
         dead_time_per_inning: dead,
+        player_stats,
     }
 }
 
@@ -516,6 +606,35 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
             need_switch |= match evt.code.as_str() {
                 "set_teams" => {
                     handle_set_teams(&mut r, &evt.attributes);
+                    false
+                }
+                "fill_lineup_index" => {
+                    if let (Some(tid), Some(pid), Some(idx)) = (
+                        attr_str(&evt.attributes, "teamId"),
+                        attr_str(&evt.attributes, "playerId"),
+                        attr_usize(&evt.attributes, "index"),
+                    ) {
+                        r.players.handle_fill_lineup(tid, pid, idx);
+                    }
+                    false
+                }
+                "fill_position" => {
+                    if let (Some(tid), Some(pid), Some(pos)) = (
+                        attr_str(&evt.attributes, "teamId"),
+                        attr_str(&evt.attributes, "playerId"),
+                        attr_str(&evt.attributes, "position"),
+                    ) {
+                        r.players.handle_fill_position(tid, pid, pos);
+                    }
+                    false
+                }
+                "goto_lineup_index" => {
+                    if let (Some(tid), Some(idx)) = (
+                        attr_str(&evt.attributes, "teamId"),
+                        attr_usize(&evt.attributes, "index"),
+                    ) {
+                        r.players.handle_goto(tid, idx);
+                    }
                     false
                 }
                 "pitch" => handle_pitch(&mut r, &evt.attributes),

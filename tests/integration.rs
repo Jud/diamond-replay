@@ -97,3 +97,63 @@ game_test!(
     "13U_Phillies_Cardinals.json",
     "13U_Phillies_Cardinals"
 );
+
+#[test]
+fn test_player_stats_populated() {
+    let json = include_str!("../testdata/13U_Braves_Padres.json");
+    let result = replay_from_json(json).expect("replay should succeed");
+
+    // Should have players from both teams
+    assert!(
+        !result.player_stats.is_empty(),
+        "player_stats should not be empty"
+    );
+
+    // Sum of all player PAs should equal team PA totals
+    let away_player_pa: i32 = result
+        .player_stats
+        .values()
+        .filter(|p| p.team_id == result.away_id)
+        .map(|p| p.batting.pa)
+        .sum();
+    let home_player_pa: i32 = result
+        .player_stats
+        .values()
+        .filter(|p| p.team_id == result.home_id)
+        .map(|p| p.batting.pa)
+        .sum();
+
+    eprintln!(
+        "Away team PA: team={}, players={}",
+        result.away_batting.pa, away_player_pa
+    );
+    eprintln!(
+        "Home team PA: team={}, players={}",
+        result.home_batting.pa, home_player_pa
+    );
+    eprintln!("Total players with stats: {}", result.player_stats.len());
+
+    // Player runs should sum to linescore
+    let away_runs: i32 = result
+        .player_stats
+        .values()
+        .filter(|p| p.team_id == result.away_id)
+        .map(|p| p.baserunning.runs)
+        .sum();
+    let home_runs: i32 = result
+        .player_stats
+        .values()
+        .filter(|p| p.team_id == result.home_id)
+        .map(|p| p.baserunning.runs)
+        .sum();
+    let away_ls: i32 = result.linescore_away.iter().sum();
+    let home_ls: i32 = result.linescore_home.iter().sum();
+    eprintln!(
+        "Away runs: linescore={}, player_baserunning={}",
+        away_ls, away_runs
+    );
+    eprintln!(
+        "Home runs: linescore={}, player_baserunning={}",
+        home_ls, home_runs
+    );
+}

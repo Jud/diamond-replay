@@ -34,6 +34,8 @@ struct Ctx<'a, S: BuildHasher, S2: BuildHasher> {
     explicit: &'a HashSet<String, S>,
     runs: &'a mut HashMap<usize, i32, S2>,
     stats: &'a mut Vec<RawStats>,
+    /// Player IDs of runners who scored during this resolution.
+    scored: Vec<Option<String>>,
 }
 
 impl<S: BuildHasher, S2: BuildHasher> Ctx<'_, S, S2> {
@@ -41,18 +43,28 @@ impl<S: BuildHasher, S2: BuildHasher> Ctx<'_, S, S2> {
         already_handled(base, self.snap, self.bases, self.explicit)
     }
 
-    fn score_bip(&mut self) {
+    fn score_bip(&mut self, base: usize) {
         score::score_run(self.hi, self.runs, self.stats, true);
+        self.record_scorer(base);
     }
 
-    fn score_passive(&mut self) {
+    fn score_passive(&mut self, base: usize) {
         score::score_run(self.hi, self.runs, self.stats, false);
+        self.record_scorer(base);
+    }
+
+    fn record_scorer(&mut self, base: usize) {
+        let pid = match self.snap.get(base) {
+            Some(BaseOccupant::Player(id)) => Some(id.clone()),
+            _ => None,
+        };
+        self.scored.push(pid);
     }
 
     /// Score unhandled runner, clear their base.
     fn score_if_live(&mut self, base: usize) -> bool {
         if !self.handled(base) {
-            self.score_bip();
+            self.score_bip(base);
             self.bases.set(base, None);
             return true;
         }
@@ -122,14 +134,17 @@ fn resolve_dropped_third(
     if cause.is_some_and(BipCause::is_ball_away) {
         // Wild pitch / passed ball: all runners advance one base
         if !cx.handled(3) {
-            cx.score_passive();
+            cx.score_passive(3);
             cx.bases.set(3, None);
         }
         cx.advance_if_live(2, 3);
         cx.advance_if_live(1, 2);
         cx.bases.set(1, Some(BaseOccupant::Anonymous));
     } else {
-        score::force_advance_walk_score(cx.hi, cx.bases, cx.runs, cx.stats);
+        // Force-advance walk: if bases loaded, runner from 3B scores
+        if cx.bases.is_occupied(1) && cx.bases.is_occupied(2) && cx.bases.is_occupied(3) {
+            cx.score_passive(3);
+        }
         score::apply_walk_bases(cx.bases);
     }
 }
@@ -139,6 +154,7 @@ fn resolve_dropped_third(
 // ---------------------------------------------------------------------------
 
 /// Resolve pending implicit runner advancement from a ball-in-play.
+/// Returns player IDs of runners who scored (None for anonymous runners).
 pub fn resolve_pending<S: BuildHasher, S2: BuildHasher>(
     half_inning: usize,
     pending: &PendingImplicit,
@@ -146,9 +162,9 @@ pub fn resolve_pending<S: BuildHasher, S2: BuildHasher>(
     explicit_br: &HashSet<String, S>,
     runs_by_half: &mut HashMap<usize, i32, S2>,
     half_stats: &mut Vec<RawStats>,
-) {
+) -> Vec<Option<String>> {
     if pending.outs_after_play >= 3 && pending.play_result.is_advance_runners_out() {
-        return;
+        return Vec::new();
     }
 
     let mut cx = Ctx {
@@ -158,6 +174,7 @@ pub fn resolve_pending<S: BuildHasher, S2: BuildHasher>(
         explicit: explicit_br,
         runs: runs_by_half,
         stats: half_stats,
+        scored: Vec::new(),
     };
 
     match pending.play_result {
@@ -174,4 +191,6 @@ pub fn resolve_pending<S: BuildHasher, S2: BuildHasher>(
         PlayResult::DroppedThirdStrike => resolve_dropped_third(&mut cx, pending.cause),
         _ => {}
     }
+
+    cx.scored
 }
