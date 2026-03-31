@@ -159,7 +159,6 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let hi = r.hi();
     let offense = r.state.offense.clone();
     let defense = r.defense_team().to_string();
-    // Capture batter BEFORE any record_* call (which advances the lineup)
     r.ensure_hi_stats();
     r.half_stats[hi].pitches += 1;
     r.state.pitches_since_last_bip += 1;
@@ -176,7 +175,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
                 r.half_stats[hi].bb += 1;
                 r.half_stats[hi].pa += 1;
                 record_walk_run(r, hi, &defense);
-                score::apply_walk_bases(&mut r.state.bases, None);
+                score::apply_walk_bases(&mut r.state.bases);
                 r.state.reset_count();
                 r.players.record_bb(&offense);
                 r.players.record_pitch_bb(&defense);
@@ -208,7 +207,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             r.half_stats[hi].hbp += 1;
             r.half_stats[hi].pa += 1;
             record_walk_run(r, hi, &defense);
-            score::apply_walk_bases(&mut r.state.bases, None);
+            score::apply_walk_bases(&mut r.state.bases);
             r.state.reset_count();
             r.players.record_hbp(&offense);
             r.players.record_pitch_hbp(&defense);
@@ -264,7 +263,6 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let hi = r.hi();
     let offense = r.state.offense.clone();
     let defense = r.defense_team().to_string();
-    // Capture batter BEFORE record_bip advances the lineup
     let batter_id = r.players.current_batter(&offense).map(str::to_string);
     r.ensure_hi_stats();
 
@@ -385,8 +383,7 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
 
     if let (Some(b), Some(ref rid)) = (base, &runner_id) {
         if pt == BrPlayType::RemainedOnLastPlay && (1..=3).contains(&b) {
-            // Keep the pending snapshot in sync so already_handled
-            // doesn't treat re-identification as "runner moved."
+            // Sync snapshot so already_handled sees re-identification, not movement
             if let Some(ref mut pending) = r.state.pending {
                 pending
                     .snapshot
@@ -469,7 +466,7 @@ fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
         r.half_stats[hi].hbp += 1;
         r.half_stats[hi].pa += 1;
         record_walk_run(r, hi, &defense);
-        score::apply_walk_bases(&mut r.state.bases, None);
+        score::apply_walk_bases(&mut r.state.bases);
         r.state.reset_count();
         r.players.record_hbp(&offense);
         r.players.record_pitch_hbp(&defense);

@@ -44,7 +44,7 @@ pub fn force_advance_walk_score<S: BuildHasher>(
 }
 
 /// Perform the base-state mutations for a walk/HBP force advance.
-pub fn apply_walk_bases(bases: &mut BaseState, batter_id: Option<&str>) {
+pub fn apply_walk_bases(bases: &mut BaseState) {
     let snap1 = bases.get(1).clone();
     let snap2 = bases.get(2).clone();
 
@@ -54,11 +54,7 @@ pub fn apply_walk_bases(bases: &mut BaseState, batter_id: Option<&str>) {
     if snap1.is_some() {
         bases.set(2, snap1);
     }
-    let occupant = match batter_id {
-        Some(id) => BaseOccupant::Player(id.to_string()),
-        None => BaseOccupant::Anonymous,
-    };
-    bases.set(1, Some(occupant));
+    bases.set(1, Some(BaseOccupant::Anonymous));
 }
 
 /// Apply scorer-entered team score totals.

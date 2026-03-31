@@ -86,7 +86,6 @@ impl BaseState {
     }
 
     /// Clear an anonymous runner from the expected origin base.
-    /// Searches from origin (dest - 1) outward for Anonymous occupants only.
     pub fn clear_fallback(&mut self, dest_base: usize) -> bool {
         if !(2..=4).contains(&dest_base) {
             return false;
@@ -99,14 +98,14 @@ impl BaseState {
             }
         }
         for b in search {
-            if (1..=3).contains(&b) {
-                if let Some(occ) = &self.bases[b - 1] {
-                    if occ.is_anonymous() {
-                        self.bases[b - 1] = None;
-                        return true;
-                    }
+            if (1..=3).contains(&b)
+                && self.bases[b - 1]
+                    .as_ref()
+                    .is_some_and(BaseOccupant::is_anonymous)
+                {
+                    self.bases[b - 1] = None;
+                    return true;
                 }
-            }
         }
         false
     }

@@ -34,7 +34,6 @@ struct Ctx<'a, S: BuildHasher, S2: BuildHasher> {
     explicit: &'a HashSet<String, S>,
     runs: &'a mut HashMap<usize, i32, S2>,
     stats: &'a mut Vec<RawStats>,
-    /// Player IDs of runners who scored during this resolution.
     scored: Vec<Option<String>>,
 }
 
@@ -150,7 +149,7 @@ fn resolve_dropped_third(
         if cx.bases.is_occupied(1) && cx.bases.is_occupied(2) && cx.bases.is_occupied(3) {
             cx.score_passive(3);
         }
-        score::apply_walk_bases(cx.bases, None);
+        score::apply_walk_bases(cx.bases);
     }
 }
 
