@@ -1,0 +1,9 @@
+{
+  "10U_Mariners_Cardinals": {"away": [3,1,5,5], "home": [1,2,0,0], "awayTotal": 14, "homeTotal": 3},
+  "10U_Mets_Brewers": {"away": [0,5,0,2], "home": [0,1,1,2], "awayTotal": 7, "homeTotal": 4},
+  "10U_Braves_Yankees": {"away": [1,0,0,5,4], "home": [0,0,0,2,1], "awayTotal": 10, "homeTotal": 3},
+  "10U_Tigers_Dodgers": {"away": [1,2,0,2], "home": [1,1,1,0], "awayTotal": 5, "homeTotal": 3},
+  "13U_Braves_Padres": {"away": [3,0,2,0,0], "home": [0,0,0,7], "awayTotal": 5, "homeTotal": 7},
+  "13U_Mariners_Brewers": {"away": [0,1,1,0], "home": [1,1,1,2], "awayTotal": 2, "homeTotal": 5},
+  "13U_Phillies_Cardinals": {"away": [0,0,3,0,0], "home": [1,1,1,0,0], "awayTotal": 3, "homeTotal": 3}
+}
