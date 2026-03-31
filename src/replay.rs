@@ -159,6 +159,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let hi = r.hi();
     let offense = r.state.offense.clone();
     let defense = r.defense_team().to_string();
+    // Capture batter BEFORE any record_* call (which advances the lineup)
     r.ensure_hi_stats();
     r.half_stats[hi].pitches += 1;
     r.state.pitches_since_last_bip += 1;
@@ -175,7 +176,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
                 r.half_stats[hi].bb += 1;
                 r.half_stats[hi].pa += 1;
                 record_walk_run(r, hi, &defense);
-                score::apply_walk_bases(&mut r.state.bases);
+                score::apply_walk_bases(&mut r.state.bases, None);
                 r.state.reset_count();
                 r.players.record_bb(&offense);
                 r.players.record_pitch_bb(&defense);
@@ -207,7 +208,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             r.half_stats[hi].hbp += 1;
             r.half_stats[hi].pa += 1;
             record_walk_run(r, hi, &defense);
-            score::apply_walk_bases(&mut r.state.bases);
+            score::apply_walk_bases(&mut r.state.bases, None);
             r.state.reset_count();
             r.players.record_hbp(&offense);
             r.players.record_pitch_hbp(&defense);
@@ -263,6 +264,8 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let hi = r.hi();
     let offense = r.state.offense.clone();
     let defense = r.defense_team().to_string();
+    // Capture batter BEFORE record_bip advances the lineup
+    let batter_id = r.players.current_batter(&offense).map(str::to_string);
     r.ensure_hi_stats();
 
     if pr.is_dropped_third_strike() {
@@ -321,10 +324,10 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
                 r.state.bases.set(b, None);
             }
         }
-        // Batter scores
+        // Batter scores — use pre-captured ID (lineup already advanced by record_bip)
         score::score_run(hi, &mut r.runs_by_half, &mut r.half_stats, true);
-        if let Some(batter) = r.players.current_batter(&offense).map(str::to_string) {
-            r.players.record_run(&batter);
+        if let Some(ref bid) = batter_id {
+            r.players.record_run(bid);
         }
         r.players.record_pitch_run(&defense);
     } else if pr.sets_pending_implicit() {
@@ -382,6 +385,13 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
 
     if let (Some(b), Some(ref rid)) = (base, &runner_id) {
         if pt == BrPlayType::RemainedOnLastPlay && (1..=3).contains(&b) {
+            // Keep the pending snapshot in sync so already_handled
+            // doesn't treat re-identification as "runner moved."
+            if let Some(ref mut pending) = r.state.pending {
+                pending
+                    .snapshot
+                    .set(b, Some(BaseOccupant::Player(rid.clone())));
+            }
             update_remained(&mut r.state, b, rid);
         } else {
             r.state.bases.clear_runner(rid, b);
@@ -459,7 +469,7 @@ fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
         r.half_stats[hi].hbp += 1;
         r.half_stats[hi].pa += 1;
         record_walk_run(r, hi, &defense);
-        score::apply_walk_bases(&mut r.state.bases);
+        score::apply_walk_bases(&mut r.state.bases, None);
         r.state.reset_count();
         r.players.record_hbp(&offense);
         r.players.record_pitch_hbp(&defense);

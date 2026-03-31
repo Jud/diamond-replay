@@ -85,14 +85,13 @@ impl BaseState {
         false
     }
 
-    /// Clear an anonymous runner using fallback search from origin base.
-    /// Returns true if found and cleared.
-    pub fn clear_anonymous_from(&mut self, dest_base: usize) -> bool {
+    /// Clear an anonymous runner from the expected origin base.
+    /// Searches from origin (dest - 1) outward for Anonymous occupants only.
+    pub fn clear_fallback(&mut self, dest_base: usize) -> bool {
         if !(2..=4).contains(&dest_base) {
             return false;
         }
         let origin = dest_base - 1;
-        // Search order: origin first, then 3, 2, 1 (skipping origin)
         let mut search = vec![origin];
         for b in [3, 2, 1] {
             if b != origin {
@@ -117,7 +116,7 @@ impl BaseState {
         if self.clear_by_id(runner_id) {
             return true;
         }
-        self.clear_anonymous_from(dest_base)
+        self.clear_fallback(dest_base)
     }
 }
 

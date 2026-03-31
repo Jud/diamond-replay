@@ -54,9 +54,14 @@ impl<S: BuildHasher, S2: BuildHasher> Ctx<'_, S, S2> {
     }
 
     fn record_scorer(&mut self, base: usize) {
-        let pid = match self.snap.get(base) {
+        // Check current bases first (may have Player ID from prior resolve),
+        // fall back to snapshot.
+        let pid = match self.bases.get(base) {
             Some(BaseOccupant::Player(id)) => Some(id.clone()),
-            _ => None,
+            _ => match self.snap.get(base) {
+                Some(BaseOccupant::Player(id)) => Some(id.clone()),
+                _ => None,
+            },
         };
         self.scored.push(pid);
     }
@@ -145,7 +150,7 @@ fn resolve_dropped_third(
         if cx.bases.is_occupied(1) && cx.bases.is_occupied(2) && cx.bases.is_occupied(3) {
             cx.score_passive(3);
         }
-        score::apply_walk_bases(cx.bases);
+        score::apply_walk_bases(cx.bases, None);
     }
 }
 
