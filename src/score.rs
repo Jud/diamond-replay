@@ -2,48 +2,21 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 
 use crate::state::{BaseOccupant, BaseState};
-use crate::stats::RawStats;
 
 /// Record one run in the given half-inning.
-pub fn score_run<S: BuildHasher>(
-    half_inning: usize,
-    runs_by_half: &mut HashMap<usize, i32, S>,
-    half_stats: &mut Vec<RawStats>,
-    on_bip: bool,
-) {
+pub fn score_run<S: BuildHasher>(half_inning: usize, runs_by_half: &mut HashMap<usize, i32, S>) {
     *runs_by_half.entry(half_inning).or_insert(0) += 1;
-    ensure_stats(half_stats, half_inning);
-    if on_bip {
-        half_stats[half_inning].runs_on_bip += 1;
-    } else {
-        half_stats[half_inning].runs_passive += 1;
-    }
 }
 
 /// Undo one run in the given half-inning (reverses a prior `score_run`).
 pub fn undo_score_run<S: BuildHasher>(
     half_inning: usize,
     runs_by_half: &mut HashMap<usize, i32, S>,
-    half_stats: &mut Vec<RawStats>,
-    on_bip: bool,
 ) {
     let entry = runs_by_half.entry(half_inning).or_insert(0);
     *entry -= 1;
     if *entry == 0 {
         runs_by_half.remove(&half_inning);
-    }
-    ensure_stats(half_stats, half_inning);
-    if on_bip {
-        half_stats[half_inning].runs_on_bip -= 1;
-    } else {
-        half_stats[half_inning].runs_passive -= 1;
-    }
-}
-
-/// Ensure `half_stats` has an entry for the given half-inning.
-pub fn ensure_stats(half_stats: &mut Vec<RawStats>, half_inning: usize) {
-    while half_stats.len() <= half_inning {
-        half_stats.push(RawStats::new());
     }
 }
 
@@ -53,10 +26,9 @@ pub fn force_advance_walk_score<S: BuildHasher>(
     half_inning: usize,
     bases: &BaseState,
     runs_by_half: &mut HashMap<usize, i32, S>,
-    half_stats: &mut Vec<RawStats>,
 ) -> bool {
     if bases.is_occupied(1) && bases.is_occupied(2) && bases.is_occupied(3) {
-        score_run(half_inning, runs_by_half, half_stats, false);
+        score_run(half_inning, runs_by_half);
         true
     } else {
         false
@@ -92,7 +64,6 @@ pub fn apply_score_override<S: BuildHasher>(
     home_id: &str,
     away_id: &str,
     runs_by_half: &mut HashMap<usize, i32, S>,
-    half_stats: &mut Vec<RawStats>,
     scores: &[ScoreOverrideEntry],
 ) {
     for item in scores {
@@ -122,8 +93,6 @@ pub fn apply_score_override<S: BuildHasher>(
         if delta > 0 {
             let hi = *team_halves.last().unwrap();
             *runs_by_half.entry(hi).or_insert(0) += delta;
-            ensure_stats(half_stats, hi);
-            half_stats[hi].runs_passive += delta;
             continue;
         }
 
@@ -139,11 +108,6 @@ pub fn apply_score_override<S: BuildHasher>(
                 runs_by_half.insert(hi, new_val);
             } else {
                 runs_by_half.remove(&hi);
-            }
-            if hi < half_stats.len() {
-                let sub_pass = take.min(half_stats[hi].runs_passive);
-                half_stats[hi].runs_passive -= sub_pass;
-                half_stats[hi].runs_on_bip -= take - sub_pass;
             }
             remaining -= take;
             if remaining == 0 {

@@ -29,8 +29,8 @@ fn main() {
                     "linescore_away": result.linescore_away,
                     "home_batting": result.home_batting,
                     "away_batting": result.away_batting,
-                    "home_halves_bat": result.home_halves_bat,
-                    "away_halves_bat": result.away_halves_bat,
+                    "home_pitching": result.home_pitching,
+                    "away_pitching": result.away_pitching,
                     "first_timestamp": result.first_timestamp,
                     "last_timestamp": result.last_timestamp,
                     "duration_min": result.first_timestamp.zip(result.last_timestamp)

@@ -1,13 +1,13 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod compute;
 pub mod error;
 pub mod event;
 pub mod player;
 pub mod replay;
 pub mod score;
 pub mod state;
-pub mod stats;
 mod undo;
 
 use error::Result;

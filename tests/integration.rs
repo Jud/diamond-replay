@@ -43,34 +43,20 @@ macro_rules! game_test {
                 $game_key, result.linescore_home, expected_home
             );
 
-            // Verify runs_on_bip + runs_passive == linescore total
+            // Verify player runs sum == linescore total for both teams
             let away_total: i32 = result.linescore_away.iter().sum();
             let home_total: i32 = result.linescore_home.iter().sum();
-            assert_eq!(
-                result.away_batting.total_runs(),
-                away_total,
-                "{} away runs_total mismatch",
-                $game_key
-            );
-            assert_eq!(
-                result.home_batting.total_runs(),
-                home_total,
-                "{} home runs_total mismatch",
-                $game_key
-            );
-
-            // Verify player runs sum == linescore total for both teams
             let away_player_runs: i32 = result
                 .player_stats
                 .values()
                 .filter(|p| p.team_id == result.away_id)
-                .map(|p| p.baserunning.runs)
+                .map(|p| p.batting.runs)
                 .sum();
             let home_player_runs: i32 = result
                 .player_stats
                 .values()
                 .filter(|p| p.team_id == result.home_id)
-                .map(|p| p.baserunning.runs)
+                .map(|p| p.batting.runs)
                 .sum();
             assert_eq!(
                 away_player_runs, away_total,
@@ -82,6 +68,32 @@ macro_rules! game_test {
                 "{} home player runs mismatch: player_sum={}, linescore={}",
                 $game_key, home_player_runs, home_total
             );
+
+            // Invariant: AB + BB + HBP + SF + SAC == PA for each player with PA > 0
+            for ps in result.player_stats.values() {
+                if ps.batting.pa > 0 {
+                    assert_eq!(
+                        ps.batting.ab + ps.batting.bb + ps.batting.hbp
+                            + ps.batting.sac_fly + ps.batting.sac_bunt,
+                        ps.batting.pa,
+                        "{} player {} PA invariant failed: ab({}) + bb({}) + hbp({}) + sf({}) + sac({}) != pa({})",
+                        $game_key, ps.player_id,
+                        ps.batting.ab, ps.batting.bb, ps.batting.hbp,
+                        ps.batting.sac_fly, ps.batting.sac_bunt, ps.batting.pa
+                    );
+                }
+            }
+
+            // Invariant: hits == singles + doubles + triples + home_runs
+            for ps in result.player_stats.values() {
+                assert_eq!(
+                    ps.batting.hits,
+                    ps.batting.singles + ps.batting.doubles
+                        + ps.batting.triples + ps.batting.home_runs,
+                    "{} player {} hits invariant failed",
+                    $game_key, ps.player_id
+                );
+            }
         }
     };
 }
@@ -181,13 +193,13 @@ fn test_player_stats_populated() {
         .player_stats
         .values()
         .filter(|p| p.team_id == result.away_id)
-        .map(|p| p.baserunning.runs)
+        .map(|p| p.batting.runs)
         .sum();
     let home_runs: i32 = result
         .player_stats
         .values()
         .filter(|p| p.team_id == result.home_id)
-        .map(|p| p.baserunning.runs)
+        .map(|p| p.batting.runs)
         .sum();
     let away_ls: i32 = result.linescore_away.iter().sum();
     let home_ls: i32 = result.linescore_home.iter().sum();
@@ -199,4 +211,30 @@ fn test_player_stats_populated() {
         home_runs, home_ls,
         "Home player runs should match linescore total"
     );
+
+    // AB + BB + HBP + SF + SAC == PA
+    for ps in result.player_stats.values() {
+        if ps.batting.pa > 0 {
+            assert_eq!(
+                ps.batting.ab
+                    + ps.batting.bb
+                    + ps.batting.hbp
+                    + ps.batting.sac_fly
+                    + ps.batting.sac_bunt,
+                ps.batting.pa,
+                "Player {} PA invariant failed",
+                ps.player_id
+            );
+        }
+    }
+
+    // hits == singles + doubles + triples + home_runs
+    for ps in result.player_stats.values() {
+        assert_eq!(
+            ps.batting.hits,
+            ps.batting.singles + ps.batting.doubles + ps.batting.triples + ps.batting.home_runs,
+            "Player {} hits invariant failed",
+            ps.player_id
+        );
+    }
 }

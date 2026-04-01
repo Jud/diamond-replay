@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::event::{BrPlayType, PlayResult};
+use crate::event::{BipPlayType, BrPlayType, PitchResult, PlayResult};
+use crate::state::PAContext;
 
 // ---------------------------------------------------------------------------
 // Per-player stat structs
@@ -8,6 +9,7 @@ use crate::event::{BrPlayType, PlayResult};
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BattingStats {
+    // Raw counts
     pub pa: i32,
     pub k: i32,
     pub k_looking: i32,
@@ -22,26 +24,143 @@ pub struct BattingStats {
     pub sac_bunt: i32,
     pub fc: i32,
     pub roe: i32,
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct BaserunningStats {
+    pub gidp: i32,
+    pub rbi: i32,
     pub runs: i32,
+    pub ground_balls: i32,
+    pub fly_balls: i32,
+    pub line_drives: i32,
+    pub pop_ups: i32,
+    pub hard_hit_balls: i32,
+    pub pitches_seen: i32,
+    pub qab: i32,
+    pub competitive_ab: i32,
     pub sb: i32,
     pub cs: i32,
+
+    // Derived integer fields (computed after replay)
+    pub ab: i32,
+    pub hits: i32,
+    pub tb: i32,
+    pub xbh: i32,
+
+    // Derived rate fields (computed after replay)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obp: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ops: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iso: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub babip: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub k_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bb_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bb_k: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub woba: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gb_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fb_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ld_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hr_fb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p_pa: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qab_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub competitive_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hard_hit_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sb_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PitchingStats {
+    // Raw counts
     pub pitches: i32,
     pub balls: i32,
-    pub strikes: i32,
+    pub strikes_swinging: i32,
+    pub strikes_looking: i32,
+    pub fouls: i32,
     pub k: i32,
     pub bb: i32,
     pub hbp: i32,
     pub hits_allowed: i32,
     pub hr_allowed: i32,
     pub runs_allowed: i32,
+    pub earned_runs_allowed: i32,
+    pub outs_recorded: i32,
+    pub bf: i32,
+    pub bip: i32,
+    pub ground_balls: i32,
+    pub fly_balls: i32,
+    pub line_drives: i32,
+    pub pop_ups: i32,
+    pub first_pitch_strikes: i32,
+    pub wp: i32,
+
+    // Derived rate fields (computed after replay)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_display: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub era: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whip: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub k9: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bb9: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h9: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hr9: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub k_bb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fip: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub k_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bb_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub k_bb_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub babip: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hr_fb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gb_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fb_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ld_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sw_str_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub csw_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub c_str_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub foul_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_score: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pitches_per_ip: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -49,7 +168,6 @@ pub struct PlayerGameStats {
     pub player_id: String,
     pub team_id: String,
     pub batting: BattingStats,
-    pub baserunning: BaserunningStats,
     pub pitching: Option<PitchingStats>,
 }
 
@@ -110,6 +228,11 @@ impl PlayerTracker {
         if position == "P" {
             self.current_pitcher
                 .insert(team_id.to_string(), player_id.to_string());
+            // Ensure pitcher has PitchingStats initialized
+            let stats = self.ensure_stats(player_id);
+            if stats.pitching.is_none() {
+                stats.pitching = Some(PitchingStats::default());
+            }
         }
     }
 
@@ -148,17 +271,40 @@ impl PlayerTracker {
                 player_id: player_id.to_string(),
                 team_id,
                 batting: BattingStats::default(),
-                baserunning: BaserunningStats::default(),
                 pitching: None,
             })
     }
 
-    // -- Batting stat recording ---------------------------------------------
+    // -- Helper closures ------------------------------------------------------
+
+    fn with_batter<F: FnOnce(&mut BattingStats)>(&mut self, team_id: &str, f: F) {
+        if let Some(pid) = self.current_batter(team_id).map(str::to_string) {
+            f(&mut self.ensure_stats(&pid).batting);
+        }
+    }
+
+    fn with_pitcher<F: FnOnce(&mut PitchingStats)>(&mut self, defense_team: &str, f: F) {
+        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
+            if let Some(ref mut p) = self.ensure_stats(&pid).pitching {
+                f(p);
+            }
+        }
+    }
+
+    fn ensure_pitching(&mut self, defense_team: &str) {
+        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
+            let stats = self.ensure_stats(&pid);
+            if stats.pitching.is_none() {
+                stats.pitching = Some(PitchingStats::default());
+            }
+        }
+    }
+
+    // -- Batting stat recording -----------------------------------------------
 
     /// Record a strikeout for the current batter.
     pub fn record_k(&mut self, team_id: &str, looking: bool) {
-        if let Some(pid) = self.current_batter(team_id).map(str::to_string) {
-            let s = &mut self.ensure_stats(&pid).batting;
+        self.with_batter(team_id, |s| {
             s.pa += 1;
             s.k += 1;
             if looking {
@@ -166,34 +312,31 @@ impl PlayerTracker {
             } else {
                 s.k_swinging += 1;
             }
-        }
+        });
         self.advance_batter(team_id);
     }
 
     /// Record a walk for the current batter.
     pub fn record_bb(&mut self, team_id: &str) {
-        if let Some(pid) = self.current_batter(team_id).map(str::to_string) {
-            let s = &mut self.ensure_stats(&pid).batting;
+        self.with_batter(team_id, |s| {
             s.pa += 1;
             s.bb += 1;
-        }
+        });
         self.advance_batter(team_id);
     }
 
     /// Record an HBP for the current batter.
     pub fn record_hbp(&mut self, team_id: &str) {
-        if let Some(pid) = self.current_batter(team_id).map(str::to_string) {
-            let s = &mut self.ensure_stats(&pid).batting;
+        self.with_batter(team_id, |s| {
             s.pa += 1;
             s.hbp += 1;
-        }
+        });
         self.advance_batter(team_id);
     }
 
     /// Record a ball-in-play result for the current batter.
-    pub fn record_bip(&mut self, team_id: &str, play_result: PlayResult) {
-        if let Some(pid) = self.current_batter(team_id).map(str::to_string) {
-            let s = &mut self.ensure_stats(&pid).batting;
+    pub fn record_bip(&mut self, team_id: &str, play_result: PlayResult, bip_type: BipPlayType) {
+        self.with_batter(team_id, |s| {
             s.pa += 1;
             match play_result {
                 PlayResult::Single => s.singles += 1,
@@ -206,51 +349,42 @@ impl PlayerTracker {
                 PlayResult::Error => s.roe += 1,
                 _ => {} // other batter-out types: no hit credit
             }
-        }
-        self.advance_batter(team_id);
-    }
-
-    /// Record a dropped third strike (counts as K + PA, batter may or may not reach).
-    pub fn record_dropped_k(&mut self, team_id: &str, looking: bool) {
-        if let Some(pid) = self.current_batter(team_id).map(str::to_string) {
-            let s = &mut self.ensure_stats(&pid).batting;
-            s.pa += 1;
-            s.k += 1;
-            if looking {
-                s.k_looking += 1;
-            } else {
-                s.k_swinging += 1;
+            // Record batted ball type
+            match bip_type {
+                BipPlayType::GroundBall => s.ground_balls += 1,
+                BipPlayType::HardGroundBall => {
+                    s.ground_balls += 1;
+                    s.hard_hit_balls += 1;
+                }
+                BipPlayType::FlyBall => s.fly_balls += 1,
+                BipPlayType::LineDrive => {
+                    s.line_drives += 1;
+                    s.hard_hit_balls += 1;
+                }
+                BipPlayType::PopFly => s.pop_ups += 1,
+                BipPlayType::Other => {}
             }
-        }
+        });
         self.advance_batter(team_id);
     }
 
-    // -- Baserunning stat recording -----------------------------------------
+    // -- Run / baserunning stat recording -------------------------------------
 
     pub fn record_run(&mut self, runner_id: &str) {
-        self.ensure_stats(runner_id).baserunning.runs += 1;
+        self.ensure_stats(runner_id).batting.runs += 1;
     }
 
     /// Undo a previously recorded run for a runner.
     pub fn undo_run(&mut self, runner_id: &str) {
-        self.ensure_stats(runner_id).baserunning.runs -= 1;
-    }
-
-    /// Undo a previously recorded run allowed for the defense team's pitcher.
-    pub fn undo_pitch_run(&mut self, defense_team: &str) {
-        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
-            if let Some(ref mut p) = self.ensure_stats(&pid).pitching {
-                p.runs_allowed -= 1;
-            }
-        }
+        self.ensure_stats(runner_id).batting.runs -= 1;
     }
 
     pub fn record_sb(&mut self, runner_id: &str) {
-        self.ensure_stats(runner_id).baserunning.sb += 1;
+        self.ensure_stats(runner_id).batting.sb += 1;
     }
 
     pub fn record_cs(&mut self, runner_id: &str) {
-        self.ensure_stats(runner_id).baserunning.cs += 1;
+        self.ensure_stats(runner_id).batting.cs += 1;
     }
 
     pub fn record_baserunning(&mut self, runner_id: &str, play_type: BrPlayType, base: usize) {
@@ -265,78 +399,166 @@ impl PlayerTracker {
         }
     }
 
-    // -- Pitching stat recording --------------------------------------------
+    /// Record an RBI for a specific player.
+    pub fn record_rbi(&mut self, batter_id: &str, count: i32) {
+        self.ensure_stats(batter_id).batting.rbi += count;
+    }
+
+    /// Record a GIDP for a specific player by ID.
+    pub fn record_gidp(&mut self, batter_id: &str) {
+        self.ensure_stats(batter_id).batting.gidp += 1;
+    }
+
+    /// Record a quality at-bat for the current batter.
+    pub fn record_qab(&mut self, team_id: &str) {
+        self.with_batter(team_id, |s| {
+            s.qab += 1;
+        });
+    }
+
+    /// Record a competitive at-bat for the current batter.
+    pub fn record_competitive_ab(&mut self, team_id: &str) {
+        self.with_batter(team_id, |s| {
+            s.competitive_ab += 1;
+        });
+    }
+
+    /// Transfer per-PA context data for the batter and pitcher.
+    pub fn record_pa_context(&mut self, team_id: &str, defense_team: &str, ctx: &PAContext) {
+        // Batter: accumulate pitches seen
+        let pitches = ctx.pitches_in_pa;
+        self.with_batter(team_id, |s| {
+            s.pitches_seen += pitches;
+        });
+        // Pitcher: first pitch strike
+        if ctx.first_pitch_strike {
+            self.with_pitcher(defense_team, |p| {
+                p.first_pitch_strikes += 1;
+            });
+        }
+    }
+
+    // -- Pitching stat recording ----------------------------------------------
+
+    /// Increment the appropriate batted-ball counter on `PitchingStats`.
+    fn record_bip_type(p: &mut PitchingStats, bip_type: BipPlayType) {
+        match bip_type {
+            BipPlayType::GroundBall | BipPlayType::HardGroundBall => p.ground_balls += 1,
+            BipPlayType::FlyBall => p.fly_balls += 1,
+            BipPlayType::LineDrive => p.line_drives += 1,
+            BipPlayType::PopFly => p.pop_ups += 1,
+            BipPlayType::Other => {}
+        }
+    }
 
     /// Record a pitch thrown by the defense team's pitcher.
-    pub fn record_pitch_thrown(&mut self, defense_team: &str, is_ball: bool) {
-        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
-            let stats = self.ensure_stats(&pid);
-            let p = stats.pitching.get_or_insert_with(PitchingStats::default);
+    pub fn record_pitch_thrown(&mut self, defense_team: &str, result: PitchResult) {
+        self.ensure_pitching(defense_team);
+        self.with_pitcher(defense_team, |p| {
             p.pitches += 1;
-            if is_ball {
-                p.balls += 1;
-            } else {
-                p.strikes += 1;
+            match result {
+                PitchResult::Ball => p.balls += 1,
+                PitchResult::StrikeSwinging => p.strikes_swinging += 1,
+                PitchResult::StrikeLooking => p.strikes_looking += 1,
+                PitchResult::Foul => p.fouls += 1,
+                PitchResult::BallInPlay | PitchResult::HitByPitch | PitchResult::Unknown => {}
             }
-        }
+        });
     }
 
     /// Record a K by the pitcher.
     pub fn record_pitch_k(&mut self, defense_team: &str) {
-        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
-            let p = self
-                .ensure_stats(&pid)
-                .pitching
-                .get_or_insert_with(PitchingStats::default);
+        self.with_pitcher(defense_team, |p| {
             p.k += 1;
-        }
+        });
     }
 
     /// Record a walk allowed by the pitcher.
     pub fn record_pitch_bb(&mut self, defense_team: &str) {
-        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
-            let p = self
-                .ensure_stats(&pid)
-                .pitching
-                .get_or_insert_with(PitchingStats::default);
+        self.with_pitcher(defense_team, |p| {
             p.bb += 1;
-        }
+        });
     }
 
     /// Record an HBP by the pitcher.
     pub fn record_pitch_hbp(&mut self, defense_team: &str) {
-        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
-            let p = self
-                .ensure_stats(&pid)
-                .pitching
-                .get_or_insert_with(PitchingStats::default);
+        self.with_pitcher(defense_team, |p| {
             p.hbp += 1;
-        }
+        });
     }
 
-    /// Record a hit allowed by the pitcher.
-    pub fn record_pitch_hit(&mut self, defense_team: &str, play_result: PlayResult) {
-        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
-            let p = self
-                .ensure_stats(&pid)
-                .pitching
-                .get_or_insert_with(PitchingStats::default);
+    /// Record a hit allowed by the pitcher, including batted ball type.
+    pub fn record_pitch_hit(
+        &mut self,
+        defense_team: &str,
+        play_result: PlayResult,
+        bip_type: BipPlayType,
+    ) {
+        self.with_pitcher(defense_team, |p| {
             p.hits_allowed += 1;
             if play_result == PlayResult::HomeRun {
                 p.hr_allowed += 1;
             }
-        }
+            p.bip += 1;
+            Self::record_bip_type(p, bip_type);
+        });
+    }
+
+    /// Record a batted ball in play for the pitcher (outs, FC, errors).
+    pub fn record_pitch_bip(&mut self, defense_team: &str, bip_type: BipPlayType) {
+        self.with_pitcher(defense_team, |p| {
+            p.bip += 1;
+            Self::record_bip_type(p, bip_type);
+        });
     }
 
     /// Record a run allowed by the pitcher.
     pub fn record_pitch_run(&mut self, defense_team: &str) {
-        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
-            let p = self
-                .ensure_stats(&pid)
-                .pitching
-                .get_or_insert_with(PitchingStats::default);
+        self.with_pitcher(defense_team, |p| {
             p.runs_allowed += 1;
-        }
+        });
+    }
+
+    /// Record an earned run allowed by the pitcher.
+    pub fn record_pitch_earned_run(&mut self, defense_team: &str) {
+        self.with_pitcher(defense_team, |p| {
+            p.earned_runs_allowed += 1;
+        });
+    }
+
+    /// Undo a previously recorded run allowed for the defense team's pitcher.
+    pub fn undo_pitch_run(&mut self, defense_team: &str) {
+        self.with_pitcher(defense_team, |p| {
+            p.runs_allowed -= 1;
+        });
+    }
+
+    /// Undo a previously recorded earned run for the defense team's pitcher.
+    pub fn undo_pitch_earned_run(&mut self, defense_team: &str) {
+        self.with_pitcher(defense_team, |p| {
+            p.earned_runs_allowed -= 1;
+        });
+    }
+
+    /// Record an out recorded by the pitcher.
+    pub fn record_pitch_out(&mut self, defense_team: &str) {
+        self.with_pitcher(defense_team, |p| {
+            p.outs_recorded += 1;
+        });
+    }
+
+    /// Record a batter faced by the pitcher.
+    pub fn record_pitch_bf(&mut self, defense_team: &str) {
+        self.with_pitcher(defense_team, |p| {
+            p.bf += 1;
+        });
+    }
+
+    /// Record a wild pitch by the pitcher.
+    pub fn record_pitch_wp(&mut self, defense_team: &str) {
+        self.with_pitcher(defense_team, |p| {
+            p.wp += 1;
+        });
     }
 
     /// Remove runs from players on a team when a score override reduces the total.
@@ -354,7 +576,7 @@ impl PlayerTracker {
         let mut ids: Vec<String> = self
             .stats
             .iter()
-            .filter(|(_, s)| s.team_id == team_id && s.baserunning.runs > 0)
+            .filter(|(_, s)| s.team_id == team_id && s.batting.runs > 0)
             .map(|(id, _)| id.clone())
             .collect();
         ids.reverse();
@@ -362,7 +584,7 @@ impl PlayerTracker {
             if remaining == 0 {
                 break;
             }
-            let runs = &mut self.stats.get_mut(&id).unwrap().baserunning.runs;
+            let runs = &mut self.stats.get_mut(&id).unwrap().batting.runs;
             let take = (*runs).min(remaining);
             *runs -= take;
             remaining -= take;

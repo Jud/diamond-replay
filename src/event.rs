@@ -147,16 +147,11 @@ impl PlayResult {
     }
 
     #[must_use]
-    pub fn sets_pending_implicit(self) -> bool {
+    pub fn is_hit(self) -> bool {
         matches!(
             self,
-            Self::Single
-                | Self::Double
-                | Self::Triple
-                | Self::FieldersChoice
-                | Self::Error
-                | Self::DroppedThirdStrike
-        ) || self.is_advance_runners_out()
+            Self::Single | Self::Double | Self::Triple | Self::HomeRun
+        )
     }
 }
 
@@ -208,18 +203,6 @@ impl BrPlayType {
             Self::CaughtStealing | Self::OutOnLastPlay | Self::PickedOff
         )
     }
-
-    #[must_use]
-    pub fn is_bip_advancement(self) -> bool {
-        matches!(
-            self,
-            Self::AdvancedOnLastPlay
-                | Self::OnSamePitch
-                | Self::AdvancedOnError
-                | Self::OnSameError
-                | Self::OtherAdvance
-        )
-    }
 }
 
 /// The cause field on dropped-third-strike `ball_in_play` events.
@@ -250,6 +233,7 @@ impl BipCause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BipPlayType {
     GroundBall,
+    HardGroundBall,
     FlyBall,
     LineDrive,
     PopFly,
@@ -260,7 +244,8 @@ impl BipPlayType {
     #[must_use]
     pub fn parse(s: &str) -> Self {
         match s {
-            "ground_ball" | "hard_ground_ball" => Self::GroundBall,
+            "ground_ball" => Self::GroundBall,
+            "hard_ground_ball" => Self::HardGroundBall,
             "fly_ball" => Self::FlyBall,
             "line_drive" => Self::LineDrive,
             "pop_fly" => Self::PopFly,

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 /// Occupant of a base: either a known player or anonymous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BaseOccupant {
@@ -150,6 +152,15 @@ pub struct AutoAdvanceRecord {
     pub scored: Vec<Option<String>>,
 }
 
+/// Per-plate-appearance transient context for tracking pitch-level stats.
+#[derive(Debug, Clone, Default)]
+pub struct PAContext {
+    pub pitches_in_pa: i32,
+    pub reached_two_strikes: bool,
+    pub first_pitch_strike: bool,
+    pub pitches_after_two_strikes: i32,
+}
+
 /// Core mutable game state.
 #[derive(Debug)]
 pub struct GameState {
@@ -161,9 +172,10 @@ pub struct GameState {
     pub ball_count: i32,
     pub strike_count: i32,
     pub last_strike_type: Option<String>, // "strike_swinging" or "strike_looking"
-    pub pitches_since_last_bip: i32,
     pub bases: BaseState,
     pub auto_advance: Option<AutoAdvanceRecord>,
+    pub pa_context: PAContext,
+    pub error_runners: HashSet<String>,
 }
 
 impl Default for GameState {
@@ -184,9 +196,10 @@ impl GameState {
             ball_count: 0,
             strike_count: 0,
             last_strike_type: None,
-            pitches_since_last_bip: 0,
             bases: BaseState::new(),
             auto_advance: None,
+            pa_context: PAContext::default(),
+            error_runners: HashSet::new(),
         }
     }
 
@@ -194,6 +207,7 @@ impl GameState {
         self.ball_count = 0;
         self.strike_count = 0;
         self.last_strike_type = None;
+        self.pa_context = PAContext::default();
     }
 
     pub fn do_switch(&mut self) {
@@ -207,6 +221,7 @@ impl GameState {
         self.reset_count();
         self.bases.clear_all();
         self.auto_advance = None;
+        self.error_runners.clear();
     }
 
     #[must_use]
