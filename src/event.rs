@@ -175,6 +175,7 @@ pub enum BrPlayType {
     OnSamePitch,
     DefensiveIndifference,
     AttemptedPickoff,
+    OtherAdvance,
     Unknown,
 }
 
@@ -195,6 +196,7 @@ impl BrPlayType {
             "on_same_pitch" => Self::OnSamePitch,
             "defensive_indifference" => Self::DefensiveIndifference,
             "attempted_pickoff" => Self::AttemptedPickoff,
+            "other_advance" => Self::OtherAdvance,
             _ => Self::Unknown,
         }
     }
@@ -215,6 +217,7 @@ impl BrPlayType {
                 | Self::OnSamePitch
                 | Self::AdvancedOnError
                 | Self::OnSameError
+                | Self::OtherAdvance
         )
     }
 }

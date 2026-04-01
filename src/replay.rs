@@ -12,7 +12,7 @@ use crate::state::{BaseOccupant, GameState, PendingImplicit};
 use crate::stats::RawStats;
 
 /// Full result of replaying a game.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct GameResult {
     pub home_id: String,
     pub away_id: String,
@@ -497,7 +497,8 @@ fn update_remained(state: &mut GameState, base: usize, rid: &str) {
 
 fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
     r.resolve(false);
-    if attr_str(attrs, "reason") == Some("hit_by_pitch") {
+    let reason = attr_str(attrs, "reason").unwrap_or("");
+    if reason == "hit_by_pitch" || reason == "catcher_interference" {
         let hi = r.hi();
         let offense = r.state.offense.clone();
         let defense = r.defense_team().to_string();

@@ -1,5 +1,5 @@
 /// Raw per-half-inning stat counters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RawStats {
     pub pitches: i32,
     pub balls: i32,

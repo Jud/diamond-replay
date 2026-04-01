@@ -121,6 +121,26 @@ game_test!(
     "13U_Phillies_Cardinals.json",
     "13U_Phillies_Cardinals"
 );
+game_test!(
+    test_mccabe_tigers_reds,
+    "McCabe_Tigers_Reds.json",
+    "McCabe_Tigers_Reds"
+);
+game_test!(
+    test_mccabe_tigers_angels,
+    "McCabe_Tigers_Angels.json",
+    "McCabe_Tigers_Angels"
+);
+game_test!(
+    test_mccabe_tigers_yankees,
+    "McCabe_Tigers_Yankees.json",
+    "McCabe_Tigers_Yankees"
+);
+game_test!(
+    test_mccabe_tigers_mets,
+    "McCabe_Tigers_Mets.json",
+    "McCabe_Tigers_Mets"
+);
 
 #[test]
 fn test_player_stats_populated() {

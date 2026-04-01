@@ -6,7 +6,7 @@ use crate::event::{BrPlayType, PlayResult};
 // Per-player stat structs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BattingStats {
     pub pa: i32,
     pub k: i32,
@@ -24,14 +24,14 @@ pub struct BattingStats {
     pub roe: i32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BaserunningStats {
     pub runs: i32,
     pub sb: i32,
     pub cs: i32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PitchingStats {
     pub pitches: i32,
     pub balls: i32,
@@ -44,7 +44,7 @@ pub struct PitchingStats {
     pub runs_allowed: i32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PlayerGameStats {
     pub player_id: String,
     pub team_id: String,
