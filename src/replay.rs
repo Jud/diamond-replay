@@ -124,8 +124,13 @@ fn auto_score(r: &mut Replay, base: usize, record: &mut AutoAdvanceRecord) {
         r.players.record_pitch_earned_run(&defense);
     }
     r.players.record_pitch_run(&defense);
-    record.scored.push(pid);
+    record.scored.push(pid.clone());
     r.state.bases.set(base, None);
+    if let Some(ref id) = pid {
+        if r.state.error_runners.remove(id) {
+            record.error_tagged.insert(id.clone());
+        }
+    }
 }
 
 /// Apply eager auto-advance for a single (all runners advance 1 base).
@@ -228,8 +233,14 @@ fn undo_auto_scored_run(r: &mut Replay, runner_id: &str) {
     score::undo_score_run(hi, &mut r.runs_by_half);
     r.players.undo_run(runner_id);
     r.players.undo_pitch_run(&defense);
-    // Also undo earned run if the runner was not error-tagged
-    if !r.state.error_runners.contains(runner_id) {
+    let was_error = r
+        .state
+        .auto_advance
+        .as_ref()
+        .is_some_and(|rec| rec.error_tagged.contains(runner_id));
+    if was_error {
+        r.state.error_runners.insert(runner_id.to_string());
+    } else {
         r.players.undo_pitch_earned_run(&defense);
     }
 }
@@ -297,6 +308,7 @@ fn record_walk_run(r: &mut Replay, hi: usize, defense: &str) {
             if !r.state.error_runners.contains(pid) {
                 r.players.record_pitch_earned_run(defense);
             }
+            r.state.error_runners.remove(pid);
         } else {
             // Anonymous runner: assume earned
             r.players.record_pitch_earned_run(defense);
@@ -495,6 +507,7 @@ fn record_bip_stats(
 fn score_home_run(r: &mut Replay, defense: &str, batter_id: Option<&str>) {
     let hi = r.hi();
     let mut rbi_count: i32 = 0;
+    let mut scored_ids: Vec<String> = Vec::new();
     for b in [1, 2, 3] {
         if r.state.bases.is_occupied(b) {
             score::score_run(hi, &mut r.runs_by_half);
@@ -503,6 +516,7 @@ fn score_home_run(r: &mut Replay, defense: &str, batter_id: Option<&str>) {
                 if !r.state.error_runners.contains(id) {
                     r.players.record_pitch_earned_run(defense);
                 }
+                scored_ids.push(id.clone());
             } else {
                 r.players.record_pitch_earned_run(defense);
             }
@@ -510,6 +524,9 @@ fn score_home_run(r: &mut Replay, defense: &str, batter_id: Option<&str>) {
             r.state.bases.set(b, None);
             rbi_count += 1;
         }
+    }
+    for id in &scored_ids {
+        r.state.error_runners.remove(id);
     }
     score::score_run(hi, &mut r.runs_by_half);
     if let Some(bid) = batter_id {
@@ -650,6 +667,7 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             if !r.state.error_runners.contains(rid) {
                 r.players.record_pitch_earned_run(&defense);
             }
+            r.state.error_runners.remove(rid);
         }
     }
 
@@ -674,6 +692,7 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
                 r.state.outs += 1;
                 r.players.record_pitch_out(&defense);
             }
+            r.state.error_runners.remove(rid);
         } else {
             r.state.outs += 1;
             r.players.record_pitch_out(&defense);
@@ -782,18 +801,25 @@ fn handle_override(r: &mut Replay, attrs: &serde_json::Value) {
             &entries,
         );
 
-        // Check if runs were reduced and adjust player stats accordingly
+        // Check if runs changed and adjust player stats accordingly
         let away_after = team_run_total(&r.runs_by_half, hi, 0);
         let home_after = team_run_total(&r.runs_by_half, hi, 1);
         let away_id = r.state.away_id.clone();
         let home_id = r.state.home_id.clone();
-        if away_after < away_before {
-            r.players
-                .adjust_team_runs(&away_id, away_after - away_before);
+        let away_delta = away_after - away_before;
+        let home_delta = home_after - home_before;
+        if away_delta < 0 {
+            r.players.adjust_team_runs(&away_id, away_delta);
         }
-        if home_after < home_before {
-            r.players
-                .adjust_team_runs(&home_id, home_after - home_before);
+        if home_delta < 0 {
+            r.players.adjust_team_runs(&home_id, home_delta);
+        }
+        // Adjust pitcher runs_allowed / earned_runs_allowed for the fielding team
+        if away_delta != 0 {
+            r.players.adjust_pitch_runs(&home_id, away_delta);
+        }
+        if home_delta != 0 {
+            r.players.adjust_pitch_runs(&away_id, home_delta);
         }
     }
 

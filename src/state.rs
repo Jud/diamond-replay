@@ -150,6 +150,8 @@ impl BaseState {
 pub struct AutoAdvanceRecord {
     /// Player IDs of runners who were auto-scored (None for anonymous runners).
     pub scored: Vec<Option<String>>,
+    /// Player IDs of auto-scored runners who were error-tagged at the time they scored.
+    pub error_tagged: HashSet<String>,
 }
 
 /// Per-plate-appearance transient context for tracking pitch-level stats.

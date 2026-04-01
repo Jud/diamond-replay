@@ -275,29 +275,35 @@ impl PlayerTracker {
             })
     }
 
+    /// Get or create stats for a player with an explicit team ID.
+    /// Used for anonymous fallback players whose IDs are not in `player_team`.
+    fn ensure_stats_for_team(&mut self, player_id: &str, team_id: &str) -> &mut PlayerGameStats {
+        self.stats
+            .entry(player_id.to_string())
+            .or_insert_with(|| PlayerGameStats {
+                player_id: player_id.to_string(),
+                team_id: team_id.to_string(),
+                batting: BattingStats::default(),
+                pitching: None,
+            })
+    }
+
     // -- Helper closures ------------------------------------------------------
 
     fn with_batter<F: FnOnce(&mut BattingStats)>(&mut self, team_id: &str, f: F) {
-        if let Some(pid) = self.current_batter(team_id).map(str::to_string) {
-            f(&mut self.ensure_stats(&pid).batting);
-        }
+        let pid = self
+            .current_batter(team_id)
+            .map_or_else(|| format!("__anon_batter_{team_id}"), str::to_string);
+        f(&mut self.ensure_stats_for_team(&pid, team_id).batting);
     }
 
     fn with_pitcher<F: FnOnce(&mut PitchingStats)>(&mut self, defense_team: &str, f: F) {
-        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
-            if let Some(ref mut p) = self.ensure_stats(&pid).pitching {
-                f(p);
-            }
-        }
-    }
-
-    fn ensure_pitching(&mut self, defense_team: &str) {
-        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
-            let stats = self.ensure_stats(&pid);
-            if stats.pitching.is_none() {
-                stats.pitching = Some(PitchingStats::default());
-            }
-        }
+        let pid = self
+            .current_pitcher(defense_team)
+            .map_or_else(|| format!("__anon_pitcher_{defense_team}"), str::to_string);
+        let stats = self.ensure_stats_for_team(&pid, defense_team);
+        let p = stats.pitching.get_or_insert_with(PitchingStats::default);
+        f(p);
     }
 
     // -- Batting stat recording -----------------------------------------------
@@ -453,7 +459,6 @@ impl PlayerTracker {
 
     /// Record a pitch thrown by the defense team's pitcher.
     pub fn record_pitch_thrown(&mut self, defense_team: &str, result: PitchResult) {
-        self.ensure_pitching(defense_team);
         self.with_pitcher(defense_team, |p| {
             p.pitches += 1;
             match result {
@@ -588,6 +593,17 @@ impl PlayerTracker {
             let take = (*runs).min(remaining);
             *runs -= take;
             remaining -= take;
+        }
+    }
+
+    /// Adjust the current pitcher's `runs_allowed` and `earned_runs_allowed` by a delta.
+    /// Used when a score override changes the run total for a team.
+    pub fn adjust_pitch_runs(&mut self, defense_team: &str, delta: i32) {
+        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
+            if let Some(ref mut p) = self.ensure_stats(&pid).pitching {
+                p.runs_allowed += delta;
+                p.earned_runs_allowed += delta;
+            }
         }
     }
 
