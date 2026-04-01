@@ -1,87 +1,101 @@
-# ◇ diamond-replay
+# diamond-replay
 
-A stateful baseball game replay engine. Feed it a scoring event stream, get back linescores, per-team stats, and per-player attribution — all from the raw play-by-play data.
+A baseball game replay engine that turns play-by-play event streams into real statistics. Feed it scoring data, get back AVG, OBP, SLG, wOBA, FIP, ERA, and 40+ other stats per player.
 
-Built for youth baseball. Tested against 7 real games. Every runner on every base has a name.
+Built for youth baseball. Tested against 11 real games.
 
-## What it does
+## Quick start
 
 ```rust
-let result = diamond_replay::replay_from_json(&event_stream)?;
+let result = diamond_replay::replay_from_json(&event_json)?;
 
-// Per-inning linescores
-result.linescore_away  // [3, 0, 2, 0, 0]
-result.linescore_home  // [0, 0, 0, 7]
+// Linescores
+println!("Away: {:?}", result.linescore_away); // [3, 0, 2, 0, 0]
+println!("Home: {:?}", result.linescore_home); // [0, 0, 0, 7]
 
-// Per-player stats
-for (id, stats) in &result.player_stats {
-    println!("{}: {}AB {}H {}R {}K",
-        id,
-        stats.batting.pa,
-        stats.batting.singles + stats.batting.doubles
-            + stats.batting.triples + stats.batting.home_runs,
-        stats.baserunning.runs,
-        stats.batting.k,
+// Per-player batting
+for (id, player) in &result.player_stats {
+    let b = &player.batting;
+    println!("{id}: {}/{} ({:.3}) | {} RBI | {:.3} OBP | {:.3} SLG | {:.3} wOBA",
+        b.hits.unwrap_or(0),
+        b.ab.unwrap_or(0),
+        b.avg.unwrap_or(0.0),
+        b.rbi,
+        b.obp.unwrap_or(0.0),
+        b.slg.unwrap_or(0.0),
+        b.woba.unwrap_or(0.0),
     );
 }
-```
 
-The engine replays every pitch, every batted ball, every stolen base — reconstructing the full game state from a sequence of scoring events. It handles the mess that real scorers create: undo corrections, manual overrides, dropped third strikes, scorer-entered totals that don't match the play-by-play.
-
-## The engine
-
-The replay is a state machine. It tracks:
-
-- **Ball/strike count** — walks, strikeouts, fouls, HBP
-- **Outs** — batted-ball outs, caught stealing, picked off, dropped third strikes
-- **Base runners** — who is where, by player ID (not anonymous placeholders)
-- **Half-inning transitions** — 3 outs or explicit end-half events
-- **Implicit runner advancement** — singles advance runners from 2nd, doubles score from 3rd, etc.
-- **Scorer corrections** — undo events, score overrides, half-inning jumps
-
-Every run scored is attributed to a specific player. The engine knows who walked, who singled, who stole home — and who scored on each play.
-
-### How implicit advancement works
-
-When a ball is put in play, the event stream tells you the outcome (single, double, error, sac fly) but not always where every runner ended up. The engine applies the rules of baseball:
-
-- **Single (ground ball)**: runner from 3rd scores, others advance one base
-- **Single (fly ball)**: runner from 3rd holds, others advance
-- **Double**: runners from 2nd and 3rd score, runner from 1st to 3rd
-- **Triple**: everyone scores
-- **Sac fly**: runner from 3rd scores if someone is behind them
-
-Explicit `base_running` events override the defaults. The engine uses a **movement log** to track which bases were explicitly handled, so it never double-advances a runner that was already moved by a scorer event.
-
-## Input format
-
-The engine consumes JSON arrays of raw scoring events. Each event has a `sequence_number`, an `event_data` JSON string containing the play details, and optional timestamps.
-
-Events can be single plays or bundled transactions (e.g., a pitch + ball-in-play + base-running result in one atomic group). The engine handles both.
-
-See `testdata/` for 7 complete game event streams.
-
-## Output
-
-```rust
-pub struct GameResult {
-    pub home_id: String,
-    pub away_id: String,
-    pub linescore_away: Vec<i32>,
-    pub linescore_home: Vec<i32>,
-    pub away_batting: RawStats,      // team-level: PA, K, BB, BIP, SB, WP, PB...
-    pub home_batting: RawStats,
-    pub away_halves_bat: i32,        // innings batted (5 for a 4.5-inning game)
-    pub home_halves_bat: i32,        // innings batted (4 for a 4.5-inning game)
-    pub first_timestamp: Option<i64>,
-    pub last_timestamp: Option<i64>,
-    pub transition_gaps: Vec<f64>,   // dead time between half-innings (seconds)
-    pub dead_time_per_inning: Vec<f64>,
-    pub player_stats: HashMap<String, PlayerGameStats>,
+// Per-player pitching
+for (id, player) in &result.player_stats {
+    if let Some(p) = &player.pitching {
+        println!("{id}: {} IP | {:.2} ERA | {:.2} FIP | {:.1}% K | {:.1}% CSW",
+            p.ip_display.as_deref().unwrap_or("0.0"),
+            p.era.unwrap_or(0.0),
+            p.fip.unwrap_or(0.0),
+            p.k_pct.unwrap_or(0.0) * 100.0,
+            p.csw_pct.unwrap_or(0.0) * 100.0,
+        );
+    }
 }
 ```
 
-Per-player stats include batting (PA, K, BB, 1B/2B/3B/HR, SF, SH, FC, ROE), baserunning (R, SB, CS), and pitching (pitches, balls, strikes, K, BB, hits/runs allowed).
+## What you get
+
+### Batting (per-player and team-level)
+
+| Stat | Description |
+|------|-------------|
+| PA, AB, H, TB, XBH | Plate appearances, at-bats, hits, total bases, extra-base hits |
+| AVG, OBP, SLG, OPS | The traditional slash line |
+| ISO, BABIP | Isolated power, batting average on balls in play |
+| wOBA | Weighted on-base average (the gold standard offensive metric) |
+| K%, BB%, BB/K | Strikeout rate, walk rate, walk-to-K ratio |
+| GB%, FB%, LD% | Ground ball, fly ball, line drive rates |
+| HR/FB | Home run to fly ball rate |
+| RBI, R, SB, CS, SB% | Runs batted in, runs, stolen bases, caught stealing |
+| GIDP | Grounded into double play |
+| QAB, QAB% | Quality at-bats (the #1 youth baseball process metric) |
+| Competitive AB% | Plate appearances reaching a 2-strike count |
+| P/PA | Pitches per plate appearance |
+| Hard Hit% | Hard ground balls + line drives / balls in play |
+
+### Pitching (per-player and team-level)
+
+| Stat | Description |
+|------|-------------|
+| IP, BF, Pitches | Innings pitched, batters faced, pitch count |
+| ERA | Earned run average (with error-tagged runner tracking) |
+| FIP | Fielding independent pitching |
+| WHIP | Walks + hits per inning pitched |
+| K/9, BB/9, H/9, HR/9 | Rate stats per 9 innings |
+| K%, BB%, K-BB% | Strikeout rate, walk rate, and the difference |
+| SwStr% | Swinging strike rate |
+| CSW% | Called strikes + whiffs rate (best K predictor) |
+| FPS% | First pitch strike rate |
+| CStr%, Foul% | Called strike rate, foul ball rate |
+| BABIP | Batting average on balls in play (against) |
+| HR/FB, GB%, FB%, LD% | Batted ball profile |
+| Game Score | Bill James game score for the start |
+| Pitches/IP | Pitch efficiency |
+
+### Game data
+
+| Field | Description |
+|-------|-------------|
+| Linescores | Runs per inning, home and away |
+| Transition gaps | Dead time between half-innings (seconds) |
+| Dead time per inning | Total non-play time per full inning |
+| Timestamps | First and last event timestamps |
+
+## How it works
+
+The engine replays every pitch, every batted ball, every stolen base, reconstructing the full game state from a sequence of scoring events. It applies the rules of baseball: runners advance on hits, force on walks, tag on fly outs. Explicit base-running events from the scorer override the defaults when something unusual happens.
+
+Every run is attributed to a specific player. Every out is tracked against the pitcher on the mound. The engine handles the mess that real scorers create: undo corrections, manual score overrides, dropped third strikes, catcher interference, short lineups with batting-order wrap, and scorer-entered totals that contradict the play-by-play.
+
+After replay, a pure computation layer derives all rate statistics from the raw counts.
 
 ## Install
 
@@ -90,32 +104,45 @@ Per-player stats include batting (PA, K, BB, 1B/2B/3B/HR, SF, SH, FC, ROE), base
 diamond-replay = { git = "https://github.com/Jud/diamond-replay" }
 ```
 
+## Input format
+
+JSON arrays of scoring events. Each event has a `sequence_number`, an `event_data` JSON string containing the play details, and optional timestamps.
+
+Events can be single plays or bundled transactions (e.g., a pitch + ball-in-play + base-running result in one atomic group). See `testdata/` for 11 complete game event streams.
+
 ## Test
 
 ```
 cargo test
 ```
 
-13 tests: 7 full-game integration tests verified against ground-truth box scores, 5 undo-resolution unit tests, 1 player-attribution test asserting per-player run totals match linescores across all games.
+48 tests: 31 stat computation unit tests, 5 undo-resolution unit tests, 12 full-game integration tests verified against ground-truth linescores with per-player invariant checks (PA decomposition, hits decomposition, run attribution).
 
-## Design
+## Architecture
 
-~2,200 lines of Rust. Three dependencies: `serde`, `serde_json`, `thiserror`.
+~3,500 lines of Rust. Three dependencies: `serde`, `serde_json`, `thiserror`.
 
 ```
 src/
-  lib.rs        — public API: replay(), replay_from_json()
-  event.rs      — JSON parsing, typed enums for all event codes
-  undo.rs       — stack-based undo resolution
-  state.rs      — GameState, BaseState, BaseOccupant, PendingImplicit
-  replay.rs     — the state machine: event loop + per-event handlers
-  resolve.rs    — implicit runner advancement (the baseball rules)
-  score.rs      — run recording, walk/HBP force-advance, score overrides
-  stats.rs      — per-half-inning stat counters
-  player.rs     — lineup tracking, per-player stat attribution
+  lib.rs        public API: replay(), replay_from_json()
+  event.rs      JSON parsing, typed enums for all event codes
+  undo.rs       stack-based undo resolution
+  state.rs      GameState, BaseState, BaseOccupant, PAContext
+  replay.rs     the state machine: event loop, per-event handlers
+  compute.rs    pure stat formulas: AVG, OBP, SLG, wOBA, FIP, ERA, CSW%, etc.
+  score.rs      run recording, walk force-advance, score overrides
+  player.rs     lineup tracking, per-player stat attribution, team aggregation
 ```
 
 Pedantic clippy. Zero suppressions. No unsafe. No async.
+
+## What we can't compute (yet)
+
+These require tracking hardware that youth fields don't have:
+
+Exit velocity, launch angle, barrel%, sprint speed, bat speed, Stuff+, xBA/xSLG/xwOBA, spin rate, pitch movement, OAA fielding, catcher framing.
+
+See `docs/STATISTICS.md` for the full stat reference and `docs/EMERGING_STATS.md` for the analytics frontier.
 
 ## License
 
