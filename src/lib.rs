@@ -5,7 +5,6 @@ pub mod error;
 pub mod event;
 pub mod player;
 pub mod replay;
-pub mod resolve;
 pub mod score;
 pub mod state;
 pub mod stats;

@@ -231,6 +231,20 @@ impl PlayerTracker {
         self.ensure_stats(runner_id).baserunning.runs += 1;
     }
 
+    /// Undo a previously recorded run for a runner.
+    pub fn undo_run(&mut self, runner_id: &str) {
+        self.ensure_stats(runner_id).baserunning.runs -= 1;
+    }
+
+    /// Undo a previously recorded run allowed for the defense team's pitcher.
+    pub fn undo_pitch_run(&mut self, defense_team: &str) {
+        if let Some(pid) = self.current_pitcher(defense_team).map(str::to_string) {
+            if let Some(ref mut p) = self.ensure_stats(&pid).pitching {
+                p.runs_allowed -= 1;
+            }
+        }
+    }
+
     pub fn record_sb(&mut self, runner_id: &str) {
         self.ensure_stats(runner_id).baserunning.sb += 1;
     }

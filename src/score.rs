@@ -20,6 +20,26 @@ pub fn score_run<S: BuildHasher>(
     }
 }
 
+/// Undo one run in the given half-inning (reverses a prior `score_run`).
+pub fn undo_score_run<S: BuildHasher>(
+    half_inning: usize,
+    runs_by_half: &mut HashMap<usize, i32, S>,
+    half_stats: &mut Vec<RawStats>,
+    on_bip: bool,
+) {
+    let entry = runs_by_half.entry(half_inning).or_insert(0);
+    *entry -= 1;
+    if *entry == 0 {
+        runs_by_half.remove(&half_inning);
+    }
+    ensure_stats(half_stats, half_inning);
+    if on_bip {
+        half_stats[half_inning].runs_on_bip -= 1;
+    } else {
+        half_stats[half_inning].runs_passive -= 1;
+    }
+}
+
 /// Ensure `half_stats` has an entry for the given half-inning.
 pub fn ensure_stats(half_stats: &mut Vec<RawStats>, half_inning: usize) {
     while half_stats.len() <= half_inning {

@@ -1,7 +1,3 @@
-use std::collections::HashSet;
-
-use crate::event::{BipCause, BipPlayType, PlayResult};
-
 /// Occupant of a base: either a known player or anonymous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BaseOccupant {
@@ -67,9 +63,15 @@ impl BaseState {
         self.bases = [None, None, None];
     }
 
-    #[must_use]
-    pub fn snapshot(&self) -> BaseState {
-        self.clone()
+    /// Move the occupant from one base to another.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `from` or `to` is not in the range 1..=3.
+    pub fn advance(&mut self, from: usize, to: usize) {
+        let occ = self.get(from).clone();
+        self.set(from, None);
+        self.set(to, occ);
     }
 
     /// Clear a runner by ID. Returns true if found.
@@ -141,18 +143,11 @@ impl BaseState {
     }
 }
 
-/// Deferred implicit runner advancement from a ball-in-play.
-#[derive(Debug, Clone)]
-pub struct PendingImplicit {
-    pub play_result: PlayResult,
-    /// For dropped third strikes this is the cause (`wild_pitch`/`passed_ball`);
-    /// for everything else it's the `playType` (`ground_ball`/`fly_ball`/etc).
-    pub play_type: Option<BipPlayType>,
-    pub cause: Option<BipCause>,
-    pub snapshot: BaseState,
-    pub outs_after_play: i32,
-    /// The batter who produced this play — used to place Player(id) instead of Anonymous.
-    pub batter_id: Option<String>,
+/// Tracks which runners were auto-scored during eager auto-advance.
+#[derive(Debug, Clone, Default)]
+pub struct AutoAdvanceRecord {
+    /// Player IDs of runners who were auto-scored (None for anonymous runners).
+    pub scored: Vec<Option<String>>,
 }
 
 /// Core mutable game state.
@@ -168,10 +163,7 @@ pub struct GameState {
     pub last_strike_type: Option<String>, // "strike_swinging" or "strike_looking"
     pub pitches_since_last_bip: i32,
     pub bases: BaseState,
-    pub pending: Option<PendingImplicit>,
-    pub explicit_br_runners: HashSet<String>,
-    /// Bases whose occupants were explicitly handled by `base_running` events.
-    pub handled_bases: HashSet<usize>,
+    pub auto_advance: Option<AutoAdvanceRecord>,
 }
 
 impl Default for GameState {
@@ -194,9 +186,7 @@ impl GameState {
             last_strike_type: None,
             pitches_since_last_bip: 0,
             bases: BaseState::new(),
-            pending: None,
-            explicit_br_runners: HashSet::new(),
-            handled_bases: HashSet::new(),
+            auto_advance: None,
         }
     }
 
@@ -216,7 +206,7 @@ impl GameState {
         self.outs = 0;
         self.reset_count();
         self.bases.clear_all();
-        self.handled_bases.clear();
+        self.auto_advance = None;
     }
 
     #[must_use]

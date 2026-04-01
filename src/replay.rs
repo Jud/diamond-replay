@@ -2,13 +2,12 @@ use std::collections::HashMap;
 
 use crate::error::{ReplayError, Result};
 use crate::event::{
-    attr_bool, attr_i32, attr_str, attr_usize, BipCause, BipPlayType, BrPlayType, EventData,
-    PitchResult, PlayResult, RawApiEvent,
+    attr_bool, attr_i32, attr_str, attr_usize, BipCause, BrPlayType, EventData, PitchResult,
+    PlayResult, RawApiEvent,
 };
 use crate::player::{PlayerGameStats, PlayerTracker};
-use crate::resolve;
 use crate::score;
-use crate::state::{BaseOccupant, GameState, PendingImplicit};
+use crate::state::{AutoAdvanceRecord, BaseOccupant, GameState};
 use crate::stats::RawStats;
 
 /// Full result of replaying a game.
@@ -39,7 +38,8 @@ struct Replay {
     runs_by_half: HashMap<usize, i32>,
     half_first_ts: HashMap<usize, i64>,
     half_last_ts: HashMap<usize, i64>,
-    all_ts: Vec<i64>,
+    first_ts: Option<i64>,
+    last_ts: Option<i64>,
     players: PlayerTracker,
 }
 
@@ -51,7 +51,8 @@ impl Replay {
             runs_by_half: HashMap::new(),
             half_first_ts: HashMap::new(),
             half_last_ts: HashMap::new(),
-            all_ts: Vec::new(),
+            first_ts: None,
+            last_ts: None,
             players: PlayerTracker::new(),
         }
     }
@@ -74,39 +75,158 @@ impl Replay {
         score::ensure_stats(&mut self.half_stats, hi);
     }
 
-    fn resolve(&mut self, discard: bool) {
-        if let Some(pending) = self.state.pending.take() {
-            let explicit = self.state.explicit_br_runners.clone();
-            let handled = self.state.handled_bases.clone();
-            let defense = self.defense_team().to_string();
-            let scored = resolve::resolve_pending(
-                self.hi(),
-                &pending,
-                &mut self.state.bases,
-                &explicit,
-                &handled,
-                &mut self.runs_by_half,
-                &mut self.half_stats,
-            );
-            for pid in &scored {
-                if let Some(id) = pid {
-                    self.players.record_run(id);
-                }
-                self.players.record_pitch_run(&defense);
-            }
-        }
-        if discard {
-            self.state.explicit_br_runners.clear();
-            self.state.handled_bases.clear();
-        }
-    }
-
     fn record_ts(&mut self, ts: i64) {
-        self.all_ts.push(ts);
+        if self.first_ts.is_none() {
+            self.first_ts = Some(ts);
+        }
+        self.last_ts = Some(ts);
         let hi = self.hi();
         self.half_first_ts.entry(hi).or_insert(ts);
         self.half_last_ts.insert(hi, ts);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Eager auto-advance helpers
+// ---------------------------------------------------------------------------
+
+/// Build a `BaseOccupant` for the batter: `Player(id)` when known, `Anonymous`
+/// otherwise.
+fn batter_occupant(batter_id: Option<&str>) -> BaseOccupant {
+    match batter_id {
+        Some(id) => BaseOccupant::Player(id.to_string()),
+        None => BaseOccupant::Anonymous,
+    }
+}
+
+/// Score a runner from the given base during auto-advance.
+/// Records the run in `runs_by_half` / `half_stats`, records the player ID in
+/// `record`, and records player stats.
+fn auto_score(r: &mut Replay, base: usize, record: &mut AutoAdvanceRecord, on_bip: bool) {
+    let hi = r.hi();
+    let defense = r.defense_team().to_string();
+    let pid = match r.state.bases.get(base) {
+        Some(BaseOccupant::Player(id)) => Some(id.clone()),
+        _ => None,
+    };
+    score::score_run(hi, &mut r.runs_by_half, &mut r.half_stats, on_bip);
+    if let Some(ref id) = pid {
+        r.players.record_run(id);
+    }
+    r.players.record_pitch_run(&defense);
+    record.scored.push(pid);
+    r.state.bases.set(base, None);
+}
+
+/// Apply eager auto-advance for a single (all runners advance 1 base).
+fn auto_advance_single(r: &mut Replay, batter_id: Option<&str>) {
+    let mut record = AutoAdvanceRecord::default();
+    if r.state.bases.is_occupied(3) {
+        auto_score(r, 3, &mut record, true);
+    }
+    if r.state.bases.is_occupied(2) {
+        r.state.bases.advance(2, 3);
+    }
+    if r.state.bases.is_occupied(1) {
+        r.state.bases.advance(1, 2);
+    }
+    r.state.bases.set(1, Some(batter_occupant(batter_id)));
+    r.state.auto_advance = Some(record);
+}
+
+/// Apply eager auto-advance for a double (all runners advance 2 bases).
+fn auto_advance_double(r: &mut Replay, batter_id: Option<&str>) {
+    let mut record = AutoAdvanceRecord::default();
+    if r.state.bases.is_occupied(3) {
+        auto_score(r, 3, &mut record, true);
+    }
+    if r.state.bases.is_occupied(2) {
+        auto_score(r, 2, &mut record, true);
+    }
+    if r.state.bases.is_occupied(1) {
+        r.state.bases.advance(1, 3);
+    }
+    r.state.bases.set(2, Some(batter_occupant(batter_id)));
+    r.state.auto_advance = Some(record);
+}
+
+/// Apply eager auto-advance for a triple (all runners advance 3 bases / score).
+fn auto_advance_triple(r: &mut Replay, batter_id: Option<&str>) {
+    let mut record = AutoAdvanceRecord::default();
+    for b in [1, 2, 3] {
+        if r.state.bases.is_occupied(b) {
+            auto_score(r, b, &mut record, true);
+        }
+    }
+    r.state.bases.set(3, Some(batter_occupant(batter_id)));
+    r.state.bases.set(2, None);
+    r.state.bases.set(1, None);
+    r.state.auto_advance = Some(record);
+}
+
+/// Apply eager auto-advance for sacrifice fly / sacrifice bunt /
+/// batter-out-advance-runners.
+/// Score from 3B if runners behind, advance 2B->3B, advance 1B->2B.
+fn auto_advance_advance_out(r: &mut Replay) {
+    let mut record = AutoAdvanceRecord::default();
+    let has_behind = r.state.bases.is_occupied(1) || r.state.bases.is_occupied(2);
+    if has_behind && r.state.bases.is_occupied(3) {
+        auto_score(r, 3, &mut record, true);
+    }
+    if r.state.bases.is_occupied(2) {
+        r.state.bases.advance(2, 3);
+    }
+    if r.state.bases.is_occupied(1) {
+        r.state.bases.advance(1, 2);
+    }
+    r.state.auto_advance = Some(record);
+}
+
+/// Apply eager auto-advance for a dropped third strike.
+fn auto_advance_dropped_third(r: &mut Replay, cause: Option<BipCause>, batter_id: Option<&str>) {
+    let mut record = AutoAdvanceRecord::default();
+    if cause.is_some_and(BipCause::is_ball_away) {
+        // Wild pitch / passed ball: all runners advance one base
+        if r.state.bases.is_occupied(3) {
+            auto_score(r, 3, &mut record, false);
+        }
+        if r.state.bases.is_occupied(2) {
+            r.state.bases.advance(2, 3);
+        }
+        if r.state.bases.is_occupied(1) {
+            r.state.bases.advance(1, 2);
+        }
+        r.state.bases.set(1, Some(batter_occupant(batter_id)));
+    } else {
+        // Force-advance walk: if bases loaded, runner from 3B scores
+        if r.state.bases.is_occupied(1)
+            && r.state.bases.is_occupied(2)
+            && r.state.bases.is_occupied(3)
+        {
+            auto_score(r, 3, &mut record, false);
+        }
+        score::apply_walk_bases(&mut r.state.bases, batter_id);
+    }
+    r.state.auto_advance = Some(record);
+}
+
+/// Check if a runner was auto-scored (present in the auto-advance record).
+fn was_auto_scored(state: &GameState, runner_id: &str) -> bool {
+    state.auto_advance.as_ref().is_some_and(|rec| {
+        rec.scored
+            .iter()
+            .any(|pid| pid.as_deref() == Some(runner_id))
+    })
+}
+
+/// Undo an auto-scored run for a runner: decrement the run counter and
+/// the player/pitcher stats.
+fn undo_auto_scored_run(r: &mut Replay, runner_id: &str, on_bip: bool) {
+    let hi = r.hi();
+    let defense = r.defense_team().to_string();
+    score::undo_score_run(hi, &mut r.runs_by_half, &mut r.half_stats, on_bip);
+    r.players.undo_run(runner_id);
+    r.players.undo_pitch_run(&defense);
 }
 
 // ---------------------------------------------------------------------------
@@ -155,9 +275,6 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     }
 
     let result = PitchResult::parse(attr_str(attrs, "result").unwrap_or(""));
-    if result != PitchResult::BallInPlay {
-        r.resolve(false);
-    }
 
     let hi = r.hi();
     let offense = r.state.offense.clone();
@@ -197,7 +314,6 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             false
         }
         PitchResult::BallInPlay => {
-            r.resolve(false);
             r.ensure_hi_stats();
             let psbip = r.state.pitches_since_last_bip;
             r.half_stats[hi].bip += 1;
@@ -257,20 +373,23 @@ fn handle_strike(
 }
 
 // ---------------------------------------------------------------------------
-// Ball-in-play handling
+// Ball-in-play handling (eager auto-advance)
 // ---------------------------------------------------------------------------
 
 /// Returns true if this play caused a third out.
 fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
+    // Clear any previous auto-advance record before applying a new one
+    r.state.auto_advance = None;
     r.state.reset_count();
+
     let pr = PlayResult::parse(attr_str(attrs, "playResult").unwrap_or(""));
-    let hi = r.hi();
     let offense = r.state.offense.clone();
     let defense = r.defense_team().to_string();
     let batter_id = r.players.current_batter(&offense).map(str::to_string);
     r.ensure_hi_stats();
 
     if pr.is_dropped_third_strike() {
+        let hi = r.hi();
         let looking = r.state.last_strike_type.as_deref() == Some("strike_looking");
         r.half_stats[hi].k += 1;
         r.half_stats[hi].pa += 1;
@@ -295,33 +414,24 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         r.players.record_bip(&offense, pr);
     }
 
-    let snapshot = r.state.bases.snapshot();
-
     if pr.is_batter_out() {
         r.state.outs += 1;
         if pr == PlayResult::DoublPlay {
             r.state.outs += 1;
         }
-        if pr.is_advance_runners_out() {
-            r.state.pending = Some(PendingImplicit {
-                play_result: pr,
-                play_type: attr_str(attrs, "playType").map(BipPlayType::parse),
-                cause: None,
-                snapshot,
-                outs_after_play: r.state.outs,
-                batter_id: batter_id.clone(),
-            });
-            r.state.explicit_br_runners.clear();
-            r.state.handled_bases.clear();
+        if pr.is_advance_runners_out() && r.state.outs < 3 {
+            auto_advance_advance_out(r);
         }
         return r.state.outs >= 3;
     }
 
+    let hi = r.hi();
     if pr == PlayResult::HomeRun {
+        // Home runs are already eager — score everyone plus the batter
         for b in [1, 2, 3] {
-            if snapshot.is_occupied(b) {
+            if r.state.bases.is_occupied(b) {
                 score::score_run(hi, &mut r.runs_by_half, &mut r.half_stats, true);
-                if let Some(BaseOccupant::Player(id)) = snapshot.get(b) {
+                if let Some(BaseOccupant::Player(id)) = r.state.bases.get(b) {
                     r.players.record_run(id);
                 }
                 r.players.record_pitch_run(&defense);
@@ -334,28 +444,26 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             r.players.record_run(bid);
         }
         r.players.record_pitch_run(&defense);
-    } else if pr.sets_pending_implicit() {
-        let (cause, play_type) = if pr == PlayResult::DroppedThirdStrike {
-            (attr_str(attrs, "cause").map(BipCause::parse), None)
-        } else {
-            (None, attr_str(attrs, "playType").map(BipPlayType::parse))
-        };
-        r.state.pending = Some(PendingImplicit {
-            play_result: pr,
-            play_type,
-            cause,
-            snapshot,
-            outs_after_play: r.state.outs,
-            batter_id,
-        });
-        r.state.explicit_br_runners.clear();
-        r.state.handled_bases.clear();
+    } else {
+        // Apply eager auto-advance based on the play result
+        match pr {
+            PlayResult::Single | PlayResult::Error | PlayResult::FieldersChoice => {
+                auto_advance_single(r, batter_id.as_deref());
+            }
+            PlayResult::Double => auto_advance_double(r, batter_id.as_deref()),
+            PlayResult::Triple => auto_advance_triple(r, batter_id.as_deref()),
+            PlayResult::DroppedThirdStrike => {
+                let cause = attr_str(attrs, "cause").map(BipCause::parse);
+                auto_advance_dropped_third(r, cause, batter_id.as_deref());
+            }
+            _ => {}
+        }
     }
     false
 }
 
 // ---------------------------------------------------------------------------
-// Base-running handling
+// Base-running handling (works against post-auto-advance state)
 // ---------------------------------------------------------------------------
 
 /// Returns true if this play caused a third out.
@@ -363,10 +471,6 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let pt = BrPlayType::parse(attr_str(attrs, "playType").unwrap_or(""));
     let base = attr_usize(attrs, "base");
     let runner_id = attr_str(attrs, "runnerId").map(String::from);
-
-    if let Some(ref rid) = runner_id {
-        r.state.explicit_br_runners.insert(rid.clone());
-    }
 
     let hi = r.hi();
     let defense = r.defense_team().to_string();
@@ -382,20 +486,18 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     }
 
     if pt.is_out() {
-        // Record handled_bases before clearing the runner.
-        // Try snapshot first, then current bases.
         if let (Some(ref rid), Some(b)) = (&runner_id, base) {
-            if let Some(ref pending) = r.state.pending {
-                if let Some(origin) = pending
-                    .snapshot
-                    .find_by_id(rid)
-                    .or_else(|| r.state.bases.find_by_id(rid))
-                {
-                    r.state.handled_bases.insert(origin);
-                }
+            let on_bases = r.state.bases.find_by_id(rid).is_some();
+            if on_bases {
+                r.state.outs += 1;
+                r.state.bases.clear_runner(rid, b);
+            } else if was_auto_scored(&r.state, rid) {
+                // Runner was auto-scored but actually got out — undo the run
+                undo_auto_scored_run(r, rid, true);
+                r.state.outs += 1;
+            } else {
+                r.state.outs += 1;
             }
-            r.state.outs += 1;
-            r.state.bases.clear_runner(rid, b);
         } else {
             r.state.outs += 1;
         }
@@ -403,46 +505,38 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     }
 
     if let (Some(b), Some(ref rid)) = (base, &runner_id) {
+        let occupant = Some(BaseOccupant::Player(rid.clone()));
+        let on_bases = r.state.bases.find_by_id(rid).is_some();
+
         if pt == BrPlayType::RemainedOnLastPlay && (1..=3).contains(&b) {
-            // Record the runner's snapshot origin as handled (may differ from b).
-            // Only mark the snapshot origin — not the destination — so we don't
-            // accidentally suppress a different snapshot occupant at base b.
-            if let Some(ref pending) = r.state.pending {
-                if let Some(origin) = pending
-                    .snapshot
-                    .find_by_id(rid)
-                    .or_else(|| r.state.bases.find_by_id(rid))
-                {
-                    r.state.handled_bases.insert(origin);
+            if on_bases {
+                update_remained(&mut r.state, b, rid);
+            } else {
+                if was_auto_scored(&r.state, rid) {
+                    undo_auto_scored_run(r, rid, true);
                 }
+                r.state.bases.set(b, occupant);
             }
-            update_remained(&mut r.state, b, rid);
-        } else {
-            // Record handled_bases before clearing the runner.
-            // Try snapshot first (runner was placed by ID), then current bases
-            // (runner may have been Anonymous in snapshot but identified since).
-            if let Some(ref pending) = r.state.pending {
-                if let Some(origin) = pending
-                    .snapshot
-                    .find_by_id(rid)
-                    .or_else(|| r.state.bases.find_by_id(rid))
-                {
-                    r.state.handled_bases.insert(origin);
-                }
-            }
-            r.state.bases.clear_runner(rid, b);
-            if b == 4 {
+        } else if b == 4 {
+            if on_bases {
+                r.state.bases.clear_runner(rid, b);
                 score::score_run(
                     hi,
                     &mut r.runs_by_half,
                     &mut r.half_stats,
                     pt.is_bip_advancement(),
                 );
-            } else if (1..=3).contains(&b) {
-                r.state
-                    .bases
-                    .set(b, Some(BaseOccupant::Player(rid.clone())));
             }
+            // Not on bases (already auto-scored) → confirmation, skip
+        } else if (1..=3).contains(&b) {
+            if on_bases {
+                r.state.bases.clear_by_id(rid);
+            } else if was_auto_scored(&r.state, rid) {
+                undo_auto_scored_run(r, rid, true);
+            } else {
+                r.state.bases.clear_runner(rid, b);
+            }
+            r.state.bases.set(b, occupant);
         }
     }
     false
@@ -496,7 +590,6 @@ fn update_remained(state: &mut GameState, base: usize, rid: &str) {
 // ---------------------------------------------------------------------------
 
 fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
-    r.resolve(false);
     let reason = attr_str(attrs, "reason").unwrap_or("");
     if reason == "hit_by_pitch" || reason == "catcher_interference" {
         let hi = r.hi();
@@ -523,8 +616,6 @@ fn team_run_total(runs_by_half: &HashMap<usize, i32>, half_inning: usize, parity
 }
 
 fn handle_override(r: &mut Replay, attrs: &serde_json::Value) {
-    r.resolve(false);
-
     if let Some(scores_arr) = attrs.get("scores").and_then(|s| s.as_array()) {
         let entries: Vec<score::ScoreOverrideEntry> = scores_arr
             .iter()
@@ -620,8 +711,8 @@ fn aggregate(replay: Replay) -> GameResult {
         home_batting,
         away_halves_bat: away_halves,
         home_halves_bat: home_halves,
-        first_timestamp: replay.all_ts.iter().copied().min(),
-        last_timestamp: replay.all_ts.iter().copied().max(),
+        first_timestamp: replay.first_ts,
+        last_timestamp: replay.last_ts,
         transition_gaps: gaps,
         dead_time_per_inning: dead,
         player_stats,
@@ -729,10 +820,7 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                     handle_end_at_bat(&mut r, &evt.attributes);
                     false
                 }
-                "end_half" => {
-                    r.resolve(false);
-                    true
-                }
+                "end_half" => true,
                 "override" => {
                     handle_override(&mut r, &evt.attributes);
                     false
@@ -742,12 +830,10 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
         }
 
         if need_switch {
-            r.resolve(false);
             r.state.do_switch();
         }
     }
 
-    r.resolve(true);
     if !r.state.teams_set() {
         return Err(ReplayError::MissingTeams);
     }
