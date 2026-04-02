@@ -15,9 +15,10 @@ use ratatui::widgets::{
 };
 use ratatui::Terminal;
 
+use diamond_replay::filter::{NoStealHomeFilter, ReplayConfig};
 use diamond_replay::player::{BattingStats, PitchingStats, PlayerGameStats};
 use diamond_replay::replay::{GameResult, LittleLeagueStats};
-use diamond_replay::replay_from_json;
+use diamond_replay::{replay_from_json, replay_from_json_with_config};
 
 // ---------------------------------------------------------------------------
 // Style constants
@@ -1008,9 +1009,10 @@ fn main() {
 
     let json_mode = args.iter().any(|a| a == "--json");
     let ll_flag = args.iter().any(|a| a == "--little-league");
+    let no_steal_home = args.iter().any(|a| a == "--no-steal-home");
     let paths: Vec<&String> = args
         .iter()
-        .filter(|a| *a != "--json" && *a != "--little-league")
+        .filter(|a| *a != "--json" && *a != "--little-league" && *a != "--no-steal-home")
         .collect();
 
     // Read from file or stdin
@@ -1018,8 +1020,8 @@ fn main() {
     let (data, game_name) = if is_stdin {
         // Reading from stdin — only works with --json (TUI needs a terminal)
         if !json_mode {
-            eprintln!("Usage: diamond-replay <game.json> [--json] [--little-league]");
-            eprintln!("       cat game.json | diamond-replay --json [--little-league]");
+            eprintln!("Usage: diamond-replay <game.json> [--json] [--little-league] [--no-steal-home]");
+            eprintln!("       cat game.json | diamond-replay --json [--little-league] [--no-steal-home]");
             process::exit(1);
         }
         let mut buf = String::new();
@@ -1042,7 +1044,17 @@ fn main() {
         (data, name)
     };
 
-    let result = match replay_from_json(&data) {
+    let mut config = ReplayConfig::default();
+    if no_steal_home {
+        config.filters.push(Box::new(NoStealHomeFilter));
+    }
+
+    let result = if config.filters.is_empty() {
+        replay_from_json(&data)
+    } else {
+        replay_from_json_with_config(&data, &config)
+    };
+    let result = match result {
         Ok(r) => r,
         Err(e) => {
             let source = if is_stdin { "stdin" } else { &game_name };

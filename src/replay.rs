@@ -340,6 +340,16 @@ fn undo_auto_scored_run(r: &mut Replay, runner_id: &str) {
     } else {
         r.players.undo_pitch_earned_run(&defense);
     }
+    // If no BIP snapshot is pending, this undo is happening in a separate
+    // transaction from the BIP that auto-scored. Adjust LL runs_on_bip
+    // directly since the snapshot delta already counted it.
+    if r.pending_bip_snapshot.is_none() {
+        let ll = r.ll_for_offense();
+        ll.runs_on_bip -= 1;
+        if ll.runs_on_bip < 0 {
+            ll.runs_on_bip = 0;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -799,13 +809,17 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         BrPlayType::WildPitch => {
             r.ll_for_offense().wp += 1;
             if base == Some(4) && !pt.is_out() {
-                r.ll_for_offense().runs_passive += 1;
+                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
+                    r.ll_for_offense().runs_passive += 1;
+                }
             }
         }
         BrPlayType::PassedBall => {
             r.ll_for_offense().pb += 1;
             if base == Some(4) && !pt.is_out() {
-                r.ll_for_offense().runs_passive += 1;
+                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
+                    r.ll_for_offense().runs_passive += 1;
+                }
             }
         }
         BrPlayType::CaughtStealing => {
@@ -813,8 +827,11 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         }
         BrPlayType::StoleBase => {
             if base == Some(4) {
-                r.ll_for_offense().steals_of_home += 1;
-                r.ll_for_offense().runs_passive += 1;
+                // Only count if runner is actually on bases (not already auto-scored)
+                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
+                    r.ll_for_offense().steals_of_home += 1;
+                    r.ll_for_offense().runs_passive += 1;
+                }
             }
         }
         BrPlayType::DefensiveIndifference | BrPlayType::OnSamePitch | BrPlayType::OtherAdvance => {
@@ -1279,7 +1296,7 @@ fn build_dead_time(gaps: &[f64]) -> Vec<f64> {
 ///
 /// Returns an error if the event list is empty, teams are not set,
 /// or any event data fails to parse as JSON.
-pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
+pub fn replay_game(resolved: &[RawApiEvent], config: &crate::filter::ReplayConfig) -> Result<GameResult> {
     if resolved.is_empty() {
         return Err(ReplayError::NoEvents);
     }
@@ -1295,6 +1312,13 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
 
         let mut need_switch = false;
         for evt in &sub_events {
+            // Per-sub-event filter against live state
+            let filtered = config.apply(evt, &r.state);
+            let evt = match &filtered {
+                Some(e) => e,
+                None => continue,
+            };
+
             if let Some(ts) = evt.created_at {
                 r.record_ts(ts);
             }
