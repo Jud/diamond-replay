@@ -12,6 +12,10 @@ Interactive TUI with four views: Box Score, Batting, Pitching, and Little League
 diamond-replay game.json
 ```
 
+![Box Score](docs/screenshots/boxscore.png)
+![Advanced Batting](docs/screenshots/batting.png)
+![Little League](docs/screenshots/littleleague.png)
+
 JSON output for programmatic use:
 
 ```
