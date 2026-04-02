@@ -21,10 +21,13 @@ JSON output for programmatic use:
 ```
 diamond-replay game.json --json
 diamond-replay game.json --json --little-league
-cat game.json | diamond-replay --json --little-league
+diamond-replay game.json --json --no-steal-home
+cat game.json | diamond-replay --json --little-league --no-steal-home
 ```
 
 The `--little-league` flag adds a `teams` object with per-team batting, pitching, and defense stats shaped for youth baseball analytics (runs on BIP vs passive, pace between balls in play, baserunning chaos, free bases).
+
+The `--no-steal-home` flag simulates what the game would look like if stealing home were banned. Runners attempting to steal home stay at 3B. They can still score on hits, walks, wild pitches, and passed balls. The entire game replays with the altered base state, so downstream stats reflect the alternate reality.
 
 ## Library
 
@@ -146,7 +149,9 @@ Half the runs came from balls in play. The other half came from walks, wild pitc
 
 The engine replays every pitch, every batted ball, every stolen base, reconstructing the full game state from a sequence of scoring events. It applies the rules of baseball: runners advance on hits, force on walks, tag on fly outs. Explicit base-running events from the scorer override the defaults when something unusual happens.
 
-Every run is attributed to a specific player. Every out is tracked against the pitcher on the mound. The engine handles the mess that real scorers create: undo corrections, manual score overrides, dropped third strikes, catcher interference, short lineups with batting-order wrap, and scorer-entered totals that contradict the play-by-play.
+Every run is attributed to a specific player. Every out is tracked against the pitcher on the mound. The engine handles the mess that real scorers create: undo/redo corrections, manual score overrides, dropped third strikes, catcher interference, short lineups with batting-order wrap, and scorer-entered totals that contradict the play-by-play.
+
+Game simulations (`--no-steal-home`) use a per-sub-event filter that transforms events before the state machine processes them. The filter sees live game state after each prior event, so it correctly handles mid-transaction interactions like auto-advance corrections.
 
 After replay, a pure computation layer derives all rate statistics from the raw counts.
 
@@ -161,7 +166,7 @@ diamond-replay = { git = "https://github.com/Jud/diamond-replay" }
 
 JSON arrays of scoring events. Each event has a `sequence_number`, an `event_data` JSON string containing the play details, and optional timestamps.
 
-Events can be single plays or bundled transactions (e.g., a pitch + ball-in-play + base-running result in one atomic group). See `testdata/` for 11 complete game event streams.
+Events can be single plays or bundled transactions (e.g., a pitch + ball-in-play + base-running result in one atomic group). See `testdata/` for 14 complete game event streams.
 
 ## Test
 
@@ -169,7 +174,7 @@ Events can be single plays or bundled transactions (e.g., a pitch + ball-in-play
 cargo test
 ```
 
-48 tests: 36 stat computation unit tests, 12 full-game integration tests verified against ground-truth linescores with per-player invariant checks (PA decomposition, hits decomposition, run attribution).
+65 tests: 36 stat computation unit tests, 29 integration tests (14 full-game linescore + invariant checks, 13 Little League balance invariants, undo/redo regression test, game simulation test).
 
 ## Architecture
 
@@ -179,7 +184,8 @@ cargo test
 src/
   lib.rs              public API: replay(), replay_from_json()
   event.rs            JSON parsing, typed enums for all event codes
-  undo.rs             stack-based undo resolution
+  undo.rs             stack-based undo/redo resolution
+  filter.rs           EventFilter trait, per-sub-event simulation filters
   state.rs            GameState, BaseState, BaseOccupant, PAContext
   replay.rs           the state machine: event loop, per-event handlers, LL stats
   compute.rs          pure stat formulas: AVG, OBP, SLG, wOBA, FIP, ERA, CSW%, etc.
