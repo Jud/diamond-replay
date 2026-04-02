@@ -1,8 +1,8 @@
-# diamond-replay
+# ◇ diamond-replay
 
 A baseball game replay engine that turns play-by-play event streams into real statistics. Feed it scoring data, get back AVG, OBP, SLG, wOBA, FIP, ERA, and 40+ other stats per player, plus youth-baseball-specific analytics like run sourcing, pace, and baserunning chaos.
 
-Built for youth baseball. Tested against 12 real games across 10U and 13U divisions.
+Built for youth baseball.
 
 ## CLI
 
@@ -10,17 +10,17 @@ Interactive TUI with four views: Box Score, Batting, Pitching, and Little League
 
 ```
 diamond-replay game.json
+cat game.json | diamond-replay --json
 ```
 
 ![Box Score](docs/screenshots/boxscore.png)
-![Advanced Batting](docs/screenshots/batting.png)
-![Little League](docs/screenshots/littleleague.png)
 
 JSON output for programmatic use:
 
 ```
 diamond-replay game.json --json
 diamond-replay game.json --json --little-league
+cat game.json | diamond-replay --json --little-league
 ```
 
 The `--little-league` flag adds a `teams` object with per-team batting, pitching, and defense stats shaped for youth baseball analytics (runs on BIP vs passive, pace between balls in play, baserunning chaos, free bases).

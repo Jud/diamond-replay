@@ -1031,30 +1031,43 @@ fn main() {
         .filter(|a| *a != "--json" && *a != "--little-league")
         .collect();
 
-    if paths.is_empty() {
-        eprintln!("Usage: diamond-replay <game.json> [--json] [--little-league]");
-        process::exit(1);
-    }
-
-    let path = paths[0];
-    let data = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("Error reading {path}: {e}");
-        process::exit(1);
-    });
+    // Read from file or stdin
+    let is_stdin = paths.is_empty();
+    let (data, game_name) = if is_stdin {
+        // Reading from stdin — only works with --json (TUI needs a terminal)
+        if !json_mode {
+            eprintln!("Usage: diamond-replay <game.json> [--json] [--little-league]");
+            eprintln!("       cat game.json | diamond-replay --json [--little-league]");
+            process::exit(1);
+        }
+        let mut buf = String::new();
+        io::Read::read_to_string(&mut io::stdin(), &mut buf).unwrap_or_else(|e| {
+            eprintln!("Error reading stdin: {e}");
+            process::exit(1);
+        });
+        (buf, "stdin".to_string())
+    } else {
+        let path = paths[0];
+        let data = fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("Error reading {path}: {e}");
+            process::exit(1);
+        });
+        let name = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path)
+            .to_string();
+        (data, name)
+    };
 
     let result = match replay_from_json(&data) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Error replaying {path}: {e}");
+            let source = if is_stdin { "stdin" } else { &game_name };
+            eprintln!("Error replaying {source}: {e}");
             process::exit(1);
         }
     };
-
-    let game_name = std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(path)
-        .to_string();
 
     if json_mode {
         dump_json(&result, &game_name, ll_flag);
