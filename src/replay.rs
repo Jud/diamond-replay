@@ -10,6 +10,27 @@ use crate::player::{BattingStats, PitchingStats, PlayerGameStats, PlayerTracker}
 use crate::score;
 use crate::state::{AutoAdvanceRecord, BaseOccupant, GameState};
 
+/// Team-level metrics especially relevant for youth/little league baseball.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LittleLeagueStats {
+    /// Runs scored as a result of a ball being put in play (hits, errors, FC, sac flies, etc.)
+    pub runs_on_bip: i32,
+    /// Runs scored without a batted ball (BB w/ bases loaded, HBP w/ bases loaded, WP, PB, balk)
+    pub runs_passive: i32,
+    /// Number of pitches between each ball in play
+    pub pitches_between_bip: Vec<i32>,
+    /// Wild pitches
+    pub wp: i32,
+    /// Passed balls
+    pub pb: i32,
+    /// Caught stealing
+    pub cs: i32,
+    /// Steals of home plate
+    pub steals_of_home: i32,
+    /// Number of pitches between each ball in play (pitching/defense perspective)
+    pub pitches_between_bip_pitching: Vec<i32>,
+}
+
 /// Full result of replaying a game.
 #[derive(Debug, serde::Serialize)]
 pub struct GameResult {
@@ -26,6 +47,8 @@ pub struct GameResult {
     pub home_batting: BattingStats,
     pub away_pitching: PitchingStats,
     pub home_pitching: PitchingStats,
+    pub away_little_league: LittleLeagueStats,
+    pub home_little_league: LittleLeagueStats,
 }
 
 // ---------------------------------------------------------------------------
@@ -42,6 +65,17 @@ struct Replay {
     first_ts: Option<i64>,
     last_ts: Option<i64>,
     players: PlayerTracker,
+    away_ll: LittleLeagueStats,
+    home_ll: LittleLeagueStats,
+    pitches_since_last_bip_away: i32,
+    pitches_since_last_bip_home: i32,
+    /// Pitching-side: pitches thrown since last BIP (away team pitching)
+    pitch_pitches_since_last_bip_away: i32,
+    /// Pitching-side: pitches thrown since last BIP (home team pitching)
+    pitch_pitches_since_last_bip_home: i32,
+    /// Pending BIP run snapshot: (parity, runs_before, is_away_batting, is_real_bip)
+    /// is_real_bip=false for dropped third strikes (runs go to passive instead).
+    pending_bip_snapshot: Option<(usize, i32, bool, bool)>,
 }
 
 impl Replay {
@@ -55,6 +89,13 @@ impl Replay {
             first_ts: None,
             last_ts: None,
             players: PlayerTracker::new(),
+            away_ll: LittleLeagueStats::default(),
+            home_ll: LittleLeagueStats::default(),
+            pitches_since_last_bip_away: 0,
+            pitches_since_last_bip_home: 0,
+            pitch_pitches_since_last_bip_away: 0,
+            pitch_pitches_since_last_bip_home: 0,
+            pending_bip_snapshot: None,
         }
     }
 
@@ -75,6 +116,62 @@ impl Replay {
         let hi = self.state.half_inning;
         if hi > self.max_half_inning {
             self.max_half_inning = hi;
+        }
+    }
+
+    /// Return the `LittleLeagueStats` for the team currently batting.
+    fn ll_for_offense(&mut self) -> &mut LittleLeagueStats {
+        if self.state.offense == self.state.away_id {
+            &mut self.away_ll
+        } else {
+            &mut self.home_ll
+        }
+    }
+
+    /// Increment pitches-since-last-BIP for both batting and pitching sides.
+    fn inc_pitches_since_last_bip(&mut self) {
+        if self.state.offense == self.state.away_id {
+            self.pitches_since_last_bip_away += 1;
+            self.pitch_pitches_since_last_bip_home += 1;
+        } else {
+            self.pitches_since_last_bip_home += 1;
+            self.pitch_pitches_since_last_bip_away += 1;
+        }
+    }
+
+    /// Push current count to pitches_between_bip and reset for both batting and pitching sides.
+    fn flush_pitches_between_bip(&mut self) {
+        if self.state.offense == self.state.away_id {
+            self.away_ll.pitches_between_bip.push(self.pitches_since_last_bip_away);
+            self.pitches_since_last_bip_away = 0;
+            self.home_ll.pitches_between_bip_pitching.push(self.pitch_pitches_since_last_bip_home);
+            self.pitch_pitches_since_last_bip_home = 0;
+        } else {
+            self.home_ll.pitches_between_bip.push(self.pitches_since_last_bip_home);
+            self.pitches_since_last_bip_home = 0;
+            self.away_ll.pitches_between_bip_pitching.push(self.pitch_pitches_since_last_bip_away);
+            self.pitch_pitches_since_last_bip_away = 0;
+        }
+    }
+
+    /// Resolve the pending BIP run snapshot after all corrections in the
+    /// transaction have been applied. The delta between runs_before and
+    /// runs_after (post-correction) is the true number of runs scored.
+    /// Uses the stored team identity so half-inning switches don't misattribute.
+    fn resolve_bip_snapshot(&mut self) {
+        if let Some((parity, runs_before, is_away, is_real_bip)) = self.pending_bip_snapshot.take() {
+            let hi = self.hi();
+            let runs_after = team_run_total(&self.runs_by_half, hi, parity);
+            let delta = runs_after - runs_before;
+            if delta > 0 {
+                let ll = if is_away { &mut self.away_ll } else { &mut self.home_ll };
+                if is_real_bip {
+                    ll.runs_on_bip += delta;
+                } else {
+                    // Dropped third strike — runs are passive (WP/PB/force)
+                    ll.runs_passive += delta;
+                }
+            }
         }
     }
 
@@ -325,6 +422,10 @@ fn complete_walk_or_hbp(r: &mut Replay, offense: &str, defense: &str, batter_id:
         && r.state.bases.is_occupied(2)
         && r.state.bases.is_occupied(3);
     record_walk_run(r, hi, defense);
+    // Track passive run for LL stats (bases-loaded walk/HBP)
+    if bases_loaded {
+        r.ll_for_offense().runs_passive += 1;
+    }
     score::apply_walk_bases(&mut r.state.bases, batter_id);
     r.players
         .record_pa_context(offense, defense, &r.state.pa_context);
@@ -382,6 +483,9 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
 
     // Record pitch for pitcher stats
     r.players.record_pitch_thrown(&defense, result);
+
+    // Track pitches between BIP for Little League stats
+    r.inc_pitches_since_last_bip();
 
     match result {
         PitchResult::Ball => {
@@ -551,6 +655,19 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let batter_id = r.players.current_batter(&offense).map(str::to_string);
     r.track_hi();
 
+    let is_dropped_third = pr.is_dropped_third_strike();
+    let is_away = offense == r.state.away_id;
+    let parity = if is_away { 0 } else { 1 };
+    let runs_before = team_run_total(&r.runs_by_half, r.hi(), parity);
+
+    // Always snapshot so we can categorize any runs scored during this event.
+    // For real BIP: runs go to runs_on_bip. For dropped thirds: runs_passive.
+    r.pending_bip_snapshot = Some((parity, runs_before, is_away, !is_dropped_third));
+
+    if !is_dropped_third {
+        r.flush_pitches_between_bip();
+    }
+
     r.players
         .record_pa_context(&offense, &defense, &r.state.pa_context);
     r.players.record_pitch_bf(&defense);
@@ -574,16 +691,17 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         r.players.record_competitive_ab(&offense);
     }
 
-    if pr.is_batter_out() {
-        return handle_bip_out(r, pr, &offense, &defense, batter_id.as_deref());
-    }
-
-    if pr == PlayResult::HomeRun {
+    let result = if pr.is_batter_out() {
+        handle_bip_out(r, pr, &offense, &defense, batter_id.as_deref())
+    } else if pr == PlayResult::HomeRun {
         score_home_run(r, &defense, batter_id.as_deref());
+        false
     } else {
         apply_bip_advance(r, pr, attrs, batter_id.as_deref());
-    }
-    false
+        false
+    };
+
+    result
 }
 
 /// Handle a batter-out on a BIP. Returns true if third out.
@@ -674,6 +792,51 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     // Track WP for pitcher
     if pt == BrPlayType::WildPitch {
         r.players.record_pitch_wp(&defense);
+    }
+
+    // LL: track WP, PB, CS, steals of home, passive runs
+    match pt {
+        BrPlayType::WildPitch => {
+            r.ll_for_offense().wp += 1;
+            if base == Some(4) && !pt.is_out() {
+                r.ll_for_offense().runs_passive += 1;
+            }
+        }
+        BrPlayType::PassedBall => {
+            r.ll_for_offense().pb += 1;
+            if base == Some(4) && !pt.is_out() {
+                r.ll_for_offense().runs_passive += 1;
+            }
+        }
+        BrPlayType::CaughtStealing => {
+            r.ll_for_offense().cs += 1;
+        }
+        BrPlayType::StoleBase => {
+            if base == Some(4) {
+                r.ll_for_offense().steals_of_home += 1;
+                r.ll_for_offense().runs_passive += 1;
+            }
+        }
+        BrPlayType::DefensiveIndifference | BrPlayType::OnSamePitch | BrPlayType::OtherAdvance => {
+            // Passive run only if runner is still on bases (not already auto-scored)
+            if base == Some(4) && !pt.is_out() {
+                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
+                    r.ll_for_offense().runs_passive += 1;
+                }
+            }
+        }
+        BrPlayType::AdvancedOnLastPlay | BrPlayType::AdvancedOnError | BrPlayType::OnSameError => {
+            // BIP run — only count if runner is still on bases (not already
+            // auto-scored) AND there's no pending BIP snapshot (which would
+            // capture this run via the delta). If there IS a pending snapshot,
+            // the delta will handle it when resolve_bip_snapshot runs.
+            if base == Some(4) && !pt.is_out() && r.pending_bip_snapshot.is_none() {
+                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
+                    r.ll_for_offense().runs_on_bip += 1;
+                }
+            }
+        }
+        _ => {}
     }
 
     if pt.is_out() {
@@ -801,7 +964,7 @@ fn handle_override(r: &mut Replay, attrs: &serde_json::Value) {
             &entries,
         );
 
-        // Check if runs changed and adjust player stats accordingly
+        // Check if runs changed and adjust player stats + LL totals accordingly
         let away_after = team_run_total(&r.runs_by_half, hi, 0);
         let home_after = team_run_total(&r.runs_by_half, hi, 1);
         let away_id = r.state.away_id.clone();
@@ -813,6 +976,25 @@ fn handle_override(r: &mut Replay, attrs: &serde_json::Value) {
         }
         if home_delta < 0 {
             r.players.adjust_team_runs(&home_id, home_delta);
+        }
+        // Adjust LL run totals to stay in sync with the official linescore.
+        // Skip if a BIP snapshot is pending — resolve_bip_snapshot will
+        // capture the post-override delta, so adjusting here would double-count.
+        if r.pending_bip_snapshot.is_none() {
+            if away_delta != 0 {
+                r.away_ll.runs_on_bip += away_delta;
+                if r.away_ll.runs_on_bip < 0 {
+                    r.away_ll.runs_passive += r.away_ll.runs_on_bip;
+                    r.away_ll.runs_on_bip = 0;
+                }
+            }
+            if home_delta != 0 {
+                r.home_ll.runs_on_bip += home_delta;
+                if r.home_ll.runs_on_bip < 0 {
+                    r.home_ll.runs_passive += r.home_ll.runs_on_bip;
+                    r.home_ll.runs_on_bip = 0;
+                }
+            }
         }
         // Adjust pitcher runs_allowed / earned_runs_allowed for the fielding team
         if away_delta != 0 {
@@ -1060,6 +1242,8 @@ fn aggregate(replay: Replay) -> GameResult {
         home_batting,
         away_pitching,
         home_pitching,
+        away_little_league: replay.away_ll,
+        home_little_league: replay.home_ll,
     }
 }
 
@@ -1172,6 +1356,10 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                 _ => false,
             };
         }
+
+        // Resolve any pending BIP run snapshot after all sub-events
+        // (including base_running corrections) have been processed.
+        r.resolve_bip_snapshot();
 
         if need_switch {
             r.state.do_switch();
