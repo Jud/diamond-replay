@@ -14,6 +14,7 @@ cat game.json | diamond-replay --json
 ```
 
 ![Box Score](docs/screenshots/boxscore.png)
+![Little League](docs/screenshots/littleleague.png)
 
 JSON output for programmatic use:
 

@@ -253,8 +253,11 @@ fn build_linescore_lines(
 
     let bold = Style::new().add_modifier(Modifier::BOLD);
 
+    // Team name column width: fit the longer name + 1 space padding
+    let team_w = away_team.len().max(home_team.len()) + 1;
+
     // Inning headers
-    let mut header_spans = vec![cell_left("", 8, DIM_STYLE)];
+    let mut header_spans = vec![cell_left("", team_w, DIM_STYLE)];
     for i in 1..=num_innings {
         header_spans.push(cell(&i.to_string(), 4, DIM_STYLE));
     }
@@ -263,7 +266,7 @@ fn build_linescore_lines(
 
     // Away row
     let away_total: i32 = away.iter().sum();
-    let mut away_spans = vec![cell_left(away_team, 8, bold)];
+    let mut away_spans = vec![cell_left(away_team, team_w, bold)];
     for i in 0..num_innings {
         let val = away.get(i).copied().unwrap_or(0);
         away_spans.push(cell(&val.to_string(), 4, int_style(val)));
@@ -277,7 +280,7 @@ fn build_linescore_lines(
 
     // Home row
     let home_total: i32 = home.iter().sum();
-    let mut home_spans = vec![cell_left(home_team, 8, bold)];
+    let mut home_spans = vec![cell_left(home_team, team_w, bold)];
     for i in 0..num_innings {
         if i < home.len() {
             let val = home[i];
@@ -591,6 +594,14 @@ fn build_pitching_lines(
 // Little League view
 // ---------------------------------------------------------------------------
 
+/// Build a label: value row for the LL view with styled spans.
+fn ll_row(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("   {label:<28}"), Style::default().fg(Color::Gray)),
+        Span::styled(format!("{value:>6}"), Style::default()),
+    ])
+}
+
 fn build_ll_team_lines(ll: &LittleLeagueStats, team_name: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -607,25 +618,17 @@ fn build_ll_team_lines(ll: &LittleLeagueStats, team_name: &str) -> Vec<Line<'sta
     )));
     let total_runs = ll.runs_on_bip + ll.runs_passive;
     let bip_run_pct = if total_runs > 0 {
-        Some(f64::from(ll.runs_on_bip) / f64::from(total_runs))
+        format!("{:.1}%", f64::from(ll.runs_on_bip) / f64::from(total_runs) * 100.0)
     } else {
-        None
+        "-".to_string()
     };
-    lines.push(Line::from(format!(
-        "   Runs on BIP:     {:>3}",
-        ll.runs_on_bip
-    )));
-    lines.push(Line::from(format!(
-        "   Passive Runs:    {:>3}    (BB/HBP/WP/PB)",
-        ll.runs_passive
-    )));
-    lines.push(Line::from(format!(
-        "   BIP Run %:     {:>5}",
-        match bip_run_pct {
-            Some(v) => format!("{:.1}%", v * 100.0),
-            None => "-".to_string(),
-        }
-    )));
+    lines.push(ll_row("Runs on BIP", &ll.runs_on_bip.to_string()));
+    lines.push(Line::from(vec![
+        Span::styled(format!("   {:<28}", "Passive Runs"), Style::default().fg(Color::Gray)),
+        Span::styled(format!("{:>6}", ll.runs_passive), Style::default()),
+        Span::styled("    (BB/HBP/WP/PB)", Style::default().fg(Color::DarkGray)),
+    ]));
+    lines.push(ll_row("BIP Run %", &bip_run_pct));
     lines.push(Line::from(""));
 
     // Pace
@@ -633,28 +636,19 @@ fn build_ll_team_lines(ll: &LittleLeagueStats, team_name: &str) -> Vec<Line<'sta
     let total_bip = ll.pitches_between_bip.len();
     let avg_pitches = if total_bip > 0 {
         let sum: i32 = ll.pitches_between_bip.iter().sum();
-        Some(f64::from(sum) / total_bip as f64)
+        format!("{:.1}", f64::from(sum) / total_bip as f64)
     } else {
-        None
+        "-".to_string()
     };
-    let min_pitches = ll.pitches_between_bip.iter().min().copied();
-    let max_pitches = ll.pitches_between_bip.iter().max().copied();
-    lines.push(Line::from(format!(
-        "   Avg pitches between BIP:  {:>5}",
-        match avg_pitches {
-            Some(v) => format!("{v:.1}"),
-            None => "-".to_string(),
-        }
-    )));
-    lines.push(Line::from(format!(
-        "   Min / Max:                {:>2} / {:<2}",
-        min_pitches.map_or("-".to_string(), |v| v.to_string()),
-        max_pitches.map_or("-".to_string(), |v| v.to_string()),
-    )));
-    lines.push(Line::from(format!(
-        "   Total BIP:                {:>3}",
-        total_bip
-    )));
+    let min_p = ll.pitches_between_bip.iter().min().copied();
+    let max_p = ll.pitches_between_bip.iter().max().copied();
+    let min_max = match (min_p, max_p) {
+        (Some(mn), Some(mx)) => format!("{mn} / {mx}"),
+        _ => "-".to_string(),
+    };
+    lines.push(ll_row("Avg pitches between BIP", &avg_pitches));
+    lines.push(ll_row("Min / Max", &min_max));
+    lines.push(ll_row("Total BIP", &total_bip.to_string()));
     lines.push(Line::from(""));
 
     // Baserunning Chaos
@@ -662,22 +656,10 @@ fn build_ll_team_lines(ll: &LittleLeagueStats, team_name: &str) -> Vec<Line<'sta
         " Baserunning Chaos",
         HEADER_STYLE,
     )));
-    lines.push(Line::from(format!(
-        "   Wild Pitches:    {:>3}",
-        ll.wp
-    )));
-    lines.push(Line::from(format!(
-        "   Passed Balls:    {:>3}",
-        ll.pb
-    )));
-    lines.push(Line::from(format!(
-        "   Caught Stealing: {:>3}",
-        ll.cs
-    )));
-    lines.push(Line::from(format!(
-        "   Steals of Home:  {:>3}",
-        ll.steals_of_home
-    )));
+    lines.push(ll_row("Wild Pitches", &ll.wp.to_string()));
+    lines.push(ll_row("Passed Balls", &ll.pb.to_string()));
+    lines.push(ll_row("Caught Stealing", &ll.cs.to_string()));
+    lines.push(ll_row("Steals of Home", &ll.steals_of_home.to_string()));
     lines.push(Line::from(""));
 
     lines
