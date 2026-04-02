@@ -9,24 +9,40 @@ use crate::event::RawApiEvent;
 pub fn resolve_undos(mut raw_events: Vec<RawApiEvent>) -> Vec<RawApiEvent> {
     raw_events.sort_by_key(|r| r.sequence_number);
     let mut stack: Vec<RawApiEvent> = Vec::with_capacity(raw_events.len());
+    let mut undo_victims: Vec<RawApiEvent> = Vec::new();
 
     for raw in raw_events {
-        // Quick check: does this event's data start with undo?
-        // We parse just enough to detect the code.
-        let is_undo = raw.event_data.contains("\"undo\"");
-        if is_undo {
-            // Verify it's actually the code field, not some attribute value
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw.event_data) {
-                if v.get("code").and_then(|c| c.as_str()) == Some("undo") {
-                    stack.pop();
-                    continue;
+        let code = extract_code(&raw.event_data);
+        match code.as_deref() {
+            Some("undo") => {
+                if let Some(victim) = stack.pop() {
+                    undo_victims.push(victim);
                 }
             }
+            Some("redo") => {
+                if let Some(restored) = undo_victims.pop() {
+                    stack.push(restored);
+                }
+            }
+            _ => {
+                // Any new non-undo/redo event clears the redo history
+                undo_victims.clear();
+                stack.push(raw);
+            }
         }
-        stack.push(raw);
     }
 
     stack
+}
+
+/// Extract the top-level "code" field from event_data JSON without full parsing.
+fn extract_code(event_data: &str) -> Option<String> {
+    if event_data.contains("\"undo\"") || event_data.contains("\"redo\"") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(event_data) {
+            return v.get("code").and_then(|c| c.as_str()).map(String::from);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
