@@ -278,11 +278,10 @@ fn auto_advance_triple(r: &mut Replay, batter_id: Option<&str>) {
 
 /// Apply eager auto-advance for sacrifice fly / sacrifice bunt /
 /// batter-out-advance-runners.
-/// Score from 3B if runners behind, advance 2B->3B, advance 1B->2B.
+/// Score from 3B, advance 2B->3B, advance 1B->2B.
 fn auto_advance_advance_out(r: &mut Replay) {
     let mut record = AutoAdvanceRecord::default();
-    let has_behind = r.state.bases.is_occupied(1) || r.state.bases.is_occupied(2);
-    if has_behind && r.state.bases.is_occupied(3) {
+    if r.state.bases.is_occupied(3) {
         auto_score(r, 3, &mut record);
     }
     if r.state.bases.is_occupied(2) {
