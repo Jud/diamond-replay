@@ -179,5 +179,17 @@
     ],
     "awayTotal": 3,
     "homeTotal": 13
+  },
+  "stars_vs_tigers_mar31": {
+    "away": [0, 0, 0, 4, 0],
+    "home": [2, 0, 0, 0, 1],
+    "awayTotal": 4,
+    "homeTotal": 3
+  },
+  "mariners_vs_tigers_apr1": {
+    "away": [3, 1, 0, 4],
+    "home": [0, 0, 3, 3],
+    "awayTotal": 8,
+    "homeTotal": 6
   }
 }

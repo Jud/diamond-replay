@@ -1,4 +1,5 @@
-use diamond_replay::replay_from_json;
+use diamond_replay::filter::{NoStealHomeFilter, ReplayConfig};
+use diamond_replay::{replay_from_json, replay_from_json_with_config};
 use std::collections::HashMap;
 
 fn load_box_scores() -> HashMap<String, (Vec<i32>, Vec<i32>)> {
@@ -153,6 +154,16 @@ game_test!(
     "McCabe_Tigers_Mets.json",
     "McCabe_Tigers_Mets"
 );
+game_test!(
+    test_stars_vs_tigers_mar31,
+    "stars_vs_tigers_mar31.json",
+    "stars_vs_tigers_mar31"
+);
+game_test!(
+    test_mariners_vs_tigers_apr1,
+    "mariners_vs_tigers_apr1.json",
+    "mariners_vs_tigers_apr1"
+);
 
 #[test]
 fn test_player_stats_populated() {
@@ -236,5 +247,114 @@ fn test_player_stats_populated() {
             "Player {} hits invariant failed",
             ps.player_id
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Little League balance invariant: runs_on_bip + runs_passive == runs_total
+// ---------------------------------------------------------------------------
+
+macro_rules! ll_balance_test {
+    ($name:ident, $file:literal) => {
+        #[test]
+        fn $name() {
+            let json = include_str!(concat!("../testdata/", $file));
+            let result = replay_from_json(json).expect("replay should succeed");
+
+            let away_total: i32 = result.linescore_away.iter().sum();
+            let home_total: i32 = result.linescore_home.iter().sum();
+            let away_ll = &result.away_little_league;
+            let home_ll = &result.home_little_league;
+
+            assert_eq!(
+                away_ll.runs_on_bip + away_ll.runs_passive, away_total,
+                "{} away LL balance: bip({}) + passive({}) = {} != linescore({})",
+                $file, away_ll.runs_on_bip, away_ll.runs_passive,
+                away_ll.runs_on_bip + away_ll.runs_passive, away_total
+            );
+            assert_eq!(
+                home_ll.runs_on_bip + home_ll.runs_passive, home_total,
+                "{} home LL balance: bip({}) + passive({}) = {} != linescore({})",
+                $file, home_ll.runs_on_bip, home_ll.runs_passive,
+                home_ll.runs_on_bip + home_ll.runs_passive, home_total
+            );
+        }
+    };
+}
+
+ll_balance_test!(test_ll_balance_mariners_cardinals, "10U_Mariners_Cardinals.json");
+ll_balance_test!(test_ll_balance_mets_brewers, "10U_Mets_Brewers.json");
+ll_balance_test!(test_ll_balance_braves_yankees, "10U_Braves_Yankees.json");
+ll_balance_test!(test_ll_balance_tigers_dodgers, "10U_Tigers_Dodgers.json");
+ll_balance_test!(test_ll_balance_13u_braves_padres, "13U_Braves_Padres.json");
+ll_balance_test!(test_ll_balance_13u_mariners_brewers, "13U_Mariners_Brewers.json");
+ll_balance_test!(test_ll_balance_13u_phillies_cardinals, "13U_Phillies_Cardinals.json");
+ll_balance_test!(test_ll_balance_mccabe_reds, "McCabe_Tigers_Reds.json");
+ll_balance_test!(test_ll_balance_mccabe_angels, "McCabe_Tigers_Angels.json");
+ll_balance_test!(test_ll_balance_mccabe_yankees, "McCabe_Tigers_Yankees.json");
+ll_balance_test!(test_ll_balance_mccabe_mets, "McCabe_Tigers_Mets.json");
+ll_balance_test!(test_ll_balance_stars_tigers, "stars_vs_tigers_mar31.json");
+ll_balance_test!(test_ll_balance_mariners_tigers_apr1, "mariners_vs_tigers_apr1.json");
+
+// ---------------------------------------------------------------------------
+// Undo/redo: Stars vs Tigers has 32 undos and 1 redo that restores a
+// strikeout. Without redo support, the linescore is wrong (4-2 not 4-3).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_undo_redo_stars_tigers() {
+    let json = include_str!("../testdata/stars_vs_tigers_mar31.json");
+    let result = replay_from_json(json).expect("replay should succeed");
+
+    // The redo restores a strikeout that is the 3rd out of an inning.
+    // Without redo, Tigers get 2 runs. With redo, they get 3.
+    let home_total: i32 = result.linescore_home.iter().sum();
+    assert_eq!(
+        home_total, 3,
+        "Tigers should have 3 runs (redo restores a strikeout that shifts inning boundary)"
+    );
+    assert_eq!(
+        result.away_pitching.outs_recorded, 15,
+        "Away pitching should have 15 outs (5 full innings of Tigers batting)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// --no-steal-home simulation: scores should change for games with steals
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_no_steal_home_reduces_runs() {
+    let json = include_str!("../testdata/10U_Mariners_Cardinals.json");
+
+    let normal = replay_from_json(json).expect("normal replay");
+    let normal_away: i32 = normal.linescore_away.iter().sum();
+
+    let mut config = ReplayConfig::default();
+    config.filters.push(Box::new(NoStealHomeFilter));
+    let simulated = replay_from_json_with_config(json, &config).expect("simulated replay");
+    let sim_away: i32 = simulated.linescore_away.iter().sum();
+
+    // Mariners had 6 steals of home. Simulation should produce fewer runs.
+    assert!(
+        sim_away < normal_away,
+        "Simulated away runs ({sim_away}) should be less than normal ({normal_away})"
+    );
+    // Steals of home should be 0 in simulation
+    assert_eq!(
+        simulated.away_little_league.steals_of_home, 0,
+        "No steals of home in simulation"
+    );
+    // PA invariants should still hold
+    for ps in simulated.player_stats.values() {
+        if ps.batting.pa > 0 {
+            assert_eq!(
+                ps.batting.ab + ps.batting.bb + ps.batting.hbp
+                    + ps.batting.sac_fly + ps.batting.sac_bunt,
+                ps.batting.pa,
+                "Player {} PA invariant failed in simulation",
+                ps.player_id
+            );
+        }
     }
 }
