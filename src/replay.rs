@@ -427,14 +427,22 @@ fn record_walk_run(r: &mut Replay, hi: usize, defense: &str) {
     }
 }
 
-/// Common logic for completing a walk or HBP plate appearance.
+/// Why the batter reached base without putting the ball in play.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReachCause {
+    Walk,
+    HitByPitch,
+    CatcherInterference,
+}
+
+/// Common logic for completing a walk, HBP, or catcher interference PA.
 /// Handles: walk run scoring, base advancement, PA context, QAB, competitive AB, RBI.
 fn complete_walk_or_hbp(
     r: &mut Replay,
     offense: &str,
     defense: &str,
     batter_id: Option<&str>,
-    is_walk: bool,
+    cause: ReachCause,
 ) {
     let hi = r.hi();
     let bases_loaded = r.state.bases.is_occupied(1)
@@ -443,11 +451,12 @@ fn complete_walk_or_hbp(
     record_walk_run(r, hi, defense);
     // Track passive run + loaded walk/HBP for LL stats
     if bases_loaded {
-        r.ll_for_offense().runs_passive += 1;
-        if is_walk {
-            r.ll_for_offense().bb_loaded += 1;
-        } else {
-            r.ll_for_offense().hbp_loaded += 1;
+        let ll = r.ll_for_offense();
+        ll.runs_passive += 1;
+        match cause {
+            ReachCause::Walk => ll.bb_loaded += 1,
+            ReachCause::HitByPitch => ll.hbp_loaded += 1,
+            ReachCause::CatcherInterference => {} // neither
         }
     }
     score::apply_walk_bases(&mut r.state.bases, batter_id);
@@ -515,7 +524,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         PitchResult::Ball => {
             r.state.ball_count += 1;
             if r.state.ball_count >= 4 {
-                complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), true);
+                complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), ReachCause::Walk);
                 r.state.reset_count();
                 r.players.record_bb(&offense);
                 r.players.record_pitch_bb(&defense);
@@ -537,7 +546,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             false
         }
         PitchResult::HitByPitch => {
-            complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), false);
+            complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), ReachCause::HitByPitch);
             r.state.reset_count();
             r.players.record_hbp(&offense);
             r.players.record_pitch_hbp(&defense);
@@ -953,8 +962,13 @@ fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
         let offense = r.state.offense.clone();
         let defense = r.defense_team().to_string();
         let batter_id = r.players.current_batter(&offense).map(str::to_string);
+        let cause = if reason == "hit_by_pitch" {
+            ReachCause::HitByPitch
+        } else {
+            ReachCause::CatcherInterference
+        };
         r.track_hi();
-        complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), false);
+        complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), cause);
         r.state.reset_count();
         r.players.record_hbp(&offense);
         r.players.record_pitch_hbp(&defense);
