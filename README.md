@@ -11,7 +11,9 @@ diamond-replay game.json --json --little-league
 diamond-replay game.json --json --no-steal-home
 ```
 
-Four TUI views: Box Score, Batting, Pitching, Little League. Press `?` on any stat column for an interactive help card with formula, MLB benchmarks, youth context, and caveats.
+![Box Score](docs/screenshots/boxscore.png)
+
+Four TUI views: Box Score, Batting, Pitching, Little League. Press `?` on any stat column for an interactive help card with formula, MLB benchmarks, youth context, and caveats. Enter to sort by selected column.
 
 `--little-league` adds per-team youth stats: run sourcing, pace, baserunning chaos, free bases.
 
