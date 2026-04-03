@@ -8,6 +8,7 @@ pub mod filter;
 pub mod player;
 pub mod replay;
 pub mod score;
+pub mod stat_help;
 pub mod state;
 mod undo;
 

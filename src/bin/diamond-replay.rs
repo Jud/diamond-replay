@@ -11,11 +11,13 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Block, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
 };
 use ratatui::Terminal;
 
 use diamond_replay::filter::{NoStealHomeFilter, ReplayConfig};
+use diamond_replay::stat_help;
 use diamond_replay::player::{BattingStats, PitchingStats, PlayerGameStats};
 use diamond_replay::replay::{GameResult, LittleLeagueStats};
 use diamond_replay::{replay_from_json, replay_from_json_with_config};
@@ -58,6 +60,15 @@ impl View {
             Self::LittleLeague => Self::BoxScore,
         }
     }
+
+    fn stat_columns(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::BoxScore => stat_help::BOXSCORE_COLUMNS,
+            Self::Batting => stat_help::BATTING_COLUMNS,
+            Self::Pitching => stat_help::PITCHING_COLUMNS,
+            Self::LittleLeague => &[],
+        }
+    }
 }
 
 struct App {
@@ -65,6 +76,9 @@ struct App {
     view: View,
     scroll: u16,
     viewport_height: u16,
+    col_cursor: usize,
+    show_help: bool,
+    help_scroll: u16,
     boxscore_content: Vec<Line<'static>>,
     batting_content: Vec<Line<'static>>,
     pitching_content: Vec<Line<'static>>,
@@ -80,6 +94,9 @@ impl App {
             view: View::BoxScore,
             scroll: 0,
             viewport_height: 0,
+            col_cursor: 0,
+            show_help: false,
+            help_scroll: 0,
             boxscore_content: build_boxscore_lines(result, away_team, home_team),
             batting_content: build_adv_batting_lines(result, away_team, home_team),
             pitching_content: build_pitching_lines(result, away_team, home_team),
@@ -112,6 +129,28 @@ impl App {
         if self.view != view {
             self.view = view;
             self.scroll = 0;
+            self.col_cursor = 0;
+            self.show_help = false;
+        }
+    }
+
+    fn move_col_left(&mut self) {
+        let cols = self.view.stat_columns();
+        if !cols.is_empty() {
+            self.col_cursor = if self.col_cursor == 0 {
+                cols.len() - 1
+            } else {
+                self.col_cursor - 1
+            };
+            self.help_scroll = 0;
+        }
+    }
+
+    fn move_col_right(&mut self) {
+        let cols = self.view.stat_columns();
+        if !cols.is_empty() {
+            self.col_cursor = (self.col_cursor + 1) % cols.len();
+            self.help_scroll = 0;
         }
     }
 }
@@ -756,19 +795,83 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     }
 }
 
-fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
-    let footer_spans = vec![
-        Span::styled("  q", HEADER_STYLE),
-        Span::styled(": quit  ", DIM_STYLE),
-        Span::styled("\u{2191}\u{2193}/jk", HEADER_STYLE),
-        Span::styled(": scroll  ", DIM_STYLE),
-        Span::styled("Tab", HEADER_STYLE),
-        Span::styled(": switch view  ", DIM_STYLE),
-        Span::styled("1/2/3/4", HEADER_STYLE),
-        Span::styled(": jump to view", DIM_STYLE),
-    ];
-    let footer = Paragraph::new(Line::from(footer_spans));
+fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let cols = app.view.stat_columns();
+    let mut spans = Vec::new();
+
+    if !cols.is_empty() {
+        let (label, _) = cols[app.col_cursor];
+        spans.push(Span::styled("  \u{2190}\u{2192}/hl", HEADER_STYLE));
+        spans.push(Span::styled(": stat  ", DIM_STYLE));
+        spans.push(Span::styled("?", HEADER_STYLE));
+        spans.push(Span::styled(format!(": help [{label}]  "), DIM_STYLE));
+    }
+
+    spans.push(Span::styled("q", HEADER_STYLE));
+    spans.push(Span::styled(": quit  ", DIM_STYLE));
+    spans.push(Span::styled("\u{2191}\u{2193}/jk", HEADER_STYLE));
+    spans.push(Span::styled(": scroll  ", DIM_STYLE));
+    spans.push(Span::styled("Tab", HEADER_STYLE));
+    spans.push(Span::styled(": view  ", DIM_STYLE));
+    spans.push(Span::styled("1/2/3/4", HEADER_STYLE));
+    spans.push(Span::styled(": jump", DIM_STYLE));
+
+    let footer = Paragraph::new(Line::from(spans));
     frame.render_widget(footer, area);
+}
+
+fn draw_help_overlay(frame: &mut ratatui::Frame, help: &stat_help::StatHelp, scroll: u16) {
+    let area = frame.area();
+    let popup_w = 62.min(area.width.saturating_sub(4));
+    let popup_h = 22.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" ? ", Style::default().fg(Color::Black).bg(Color::Cyan)),
+            Span::styled(format!(" {} ", help.name), TITLE_STYLE),
+        ]))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::new(2, 2, 1, 1));
+
+    fn section(lines: &mut Vec<Line<'static>>, header: &str, body: &str, style: Style) {
+        lines.push(Line::from(Span::styled(header.to_string(), HEADER_STYLE)));
+        lines.push(Line::from(Span::styled(body.to_string(), style)));
+        lines.push(Line::from(""));
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        help.description.to_string(),
+        Style::default(),
+    )));
+    lines.push(Line::from(""));
+
+    if !help.formula.is_empty() {
+        let bold_white = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        section(&mut lines, "Formula", help.formula, bold_white);
+    }
+
+    section(&mut lines, "MLB Benchmarks", help.mlb_benchmark, Style::default());
+    section(&mut lines, "Youth Context", help.youth_context, Style::default());
+    section(&mut lines, "Caveats", help.caveats, Style::default());
+
+    lines.push(Line::from(Span::styled(
+        "Press ? or Esc to close",
+        DIM_STYLE,
+    )));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    frame.render_widget(paragraph, popup_area);
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &mut App) {
@@ -781,7 +884,16 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
 
     draw_header(frame, chunks[0], app.view, &app.game_name);
     draw_body(frame, chunks[1], app);
-    draw_footer(frame, chunks[2]);
+    draw_footer(frame, chunks[2], app);
+
+    if app.show_help {
+        let cols = app.view.stat_columns();
+        if let Some((_, key)) = cols.get(app.col_cursor) {
+            if let Some(help) = stat_help::lookup(key) {
+                draw_help_overlay(frame, &help, app.help_scroll);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -810,19 +922,42 @@ fn run_tui(result: &GameResult, game_name: String) -> io::Result<()> {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+            // Column navigation works whether help overlay is open or not
             match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Tab => {
-                    let next = app.view.next();
-                    app.set_view(next);
-                }
-                KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
-                KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
-                KeyCode::Char('1') => app.set_view(View::BoxScore),
-                KeyCode::Char('2') => app.set_view(View::Batting),
-                KeyCode::Char('3') => app.set_view(View::Pitching),
-                KeyCode::Char('4') => app.set_view(View::LittleLeague),
-                _ => {}
+                KeyCode::Left | KeyCode::Char('h') => app.move_col_left(),
+                KeyCode::Right | KeyCode::Char('l') => app.move_col_right(),
+                _ if app.show_help => match key.code {
+                    KeyCode::Char('?') | KeyCode::Esc => {
+                        app.show_help = false;
+                        app.help_scroll = 0;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.help_scroll = app.help_scroll.saturating_add(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.help_scroll = app.help_scroll.saturating_sub(1);
+                    }
+                    _ => {}
+                },
+                _ => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('?') => {
+                        if !app.view.stat_columns().is_empty() {
+                            app.show_help = true;
+                        }
+                    }
+                    KeyCode::Tab => {
+                        let next = app.view.next();
+                        app.set_view(next);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
+                    KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
+                    KeyCode::Char('1') => app.set_view(View::BoxScore),
+                    KeyCode::Char('2') => app.set_view(View::Batting),
+                    KeyCode::Char('3') => app.set_view(View::Pitching),
+                    KeyCode::Char('4') => app.set_view(View::LittleLeague),
+                    _ => {}
+                },
             }
         }
     }
