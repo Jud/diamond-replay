@@ -907,6 +907,8 @@ fn build_ll_team_json(
     m.insert("wp".into(), i(ll.wp));
     m.insert("cs".into(), i(ll.cs));
     m.insert("steals_of_home".into(), i(ll.steals_of_home));
+    m.insert("bb_loaded".into(), i(ll.bb_loaded));
+    m.insert("hbp_loaded".into(), i(ll.hbp_loaded));
     m.insert("runs_on_bip".into(), i(ll.runs_on_bip));
     m.insert("runs_passive".into(), i(ll.runs_passive));
     m.insert("innings_bat".into(), i(innings_bat));

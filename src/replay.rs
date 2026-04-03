@@ -29,6 +29,10 @@ pub struct LittleLeagueStats {
     pub steals_of_home: i32,
     /// Number of pitches between each ball in play (pitching/defense perspective)
     pub pitches_between_bip_pitching: Vec<i32>,
+    /// Bases-loaded walks
+    pub bb_loaded: i32,
+    /// Bases-loaded HBP
+    pub hbp_loaded: i32,
 }
 
 /// Full result of replaying a game.
@@ -425,15 +429,26 @@ fn record_walk_run(r: &mut Replay, hi: usize, defense: &str) {
 
 /// Common logic for completing a walk or HBP plate appearance.
 /// Handles: walk run scoring, base advancement, PA context, QAB, competitive AB, RBI.
-fn complete_walk_or_hbp(r: &mut Replay, offense: &str, defense: &str, batter_id: Option<&str>) {
+fn complete_walk_or_hbp(
+    r: &mut Replay,
+    offense: &str,
+    defense: &str,
+    batter_id: Option<&str>,
+    is_walk: bool,
+) {
     let hi = r.hi();
     let bases_loaded = r.state.bases.is_occupied(1)
         && r.state.bases.is_occupied(2)
         && r.state.bases.is_occupied(3);
     record_walk_run(r, hi, defense);
-    // Track passive run for LL stats (bases-loaded walk/HBP)
+    // Track passive run + loaded walk/HBP for LL stats
     if bases_loaded {
         r.ll_for_offense().runs_passive += 1;
+        if is_walk {
+            r.ll_for_offense().bb_loaded += 1;
+        } else {
+            r.ll_for_offense().hbp_loaded += 1;
+        }
     }
     score::apply_walk_bases(&mut r.state.bases, batter_id);
     r.players
@@ -500,7 +515,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         PitchResult::Ball => {
             r.state.ball_count += 1;
             if r.state.ball_count >= 4 {
-                complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref());
+                complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), true);
                 r.state.reset_count();
                 r.players.record_bb(&offense);
                 r.players.record_pitch_bb(&defense);
@@ -522,7 +537,7 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             false
         }
         PitchResult::HitByPitch => {
-            complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref());
+            complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), false);
             r.state.reset_count();
             r.players.record_hbp(&offense);
             r.players.record_pitch_hbp(&defense);
@@ -939,7 +954,7 @@ fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
         let defense = r.defense_team().to_string();
         let batter_id = r.players.current_batter(&offense).map(str::to_string);
         r.track_hi();
-        complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref());
+        complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), false);
         r.state.reset_count();
         r.players.record_hbp(&offense);
         r.players.record_pitch_hbp(&defense);
