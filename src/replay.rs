@@ -970,8 +970,13 @@ fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
         r.track_hi();
         complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), cause);
         r.state.reset_count();
-        r.players.record_hbp(&offense);
-        r.players.record_pitch_hbp(&defense);
+        if reason == "hit_by_pitch" {
+            r.players.record_hbp(&offense);
+            r.players.record_pitch_hbp(&defense);
+        }
+        // Catcher interference: batter reaches base but it's not an HBP.
+        // PA context and base advancement are handled by complete_walk_or_hbp.
+        // No HBP stat credit.
     }
 }
 
