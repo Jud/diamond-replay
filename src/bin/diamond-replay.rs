@@ -71,6 +71,13 @@ impl View {
     }
 }
 
+/// Active sort: column index and direction.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SortState {
+    col: usize,
+    descending: bool,
+}
+
 struct App {
     game_name: String,
     view: View,
@@ -79,6 +86,7 @@ struct App {
     col_cursor: usize,
     show_help: bool,
     help_scroll: u16,
+    sort: Option<SortState>,
     boxscore_content: Vec<Line<'static>>,
     batting_content: Vec<Line<'static>>,
     pitching_content: Vec<Line<'static>>,
@@ -97,9 +105,10 @@ impl App {
             col_cursor: 0,
             show_help: false,
             help_scroll: 0,
-            boxscore_content: build_boxscore_lines(result, away_team, home_team),
-            batting_content: build_adv_batting_lines(result, away_team, home_team),
-            pitching_content: build_pitching_lines(result, away_team, home_team),
+            sort: None,
+            boxscore_content: build_boxscore_lines(result, away_team, home_team, None),
+            batting_content: build_adv_batting_lines(result, away_team, home_team, None),
+            pitching_content: build_pitching_lines(result, away_team, home_team, None),
             ll_content: build_ll_lines(result, away_team, home_team),
         }
     }
@@ -131,6 +140,7 @@ impl App {
             self.scroll = 0;
             self.col_cursor = 0;
             self.show_help = false;
+            self.sort = None;
         }
     }
 
@@ -152,6 +162,106 @@ impl App {
             self.col_cursor = (self.col_cursor + 1) % cols.len();
             self.help_scroll = 0;
         }
+    }
+
+    fn toggle_sort(&mut self) {
+        if self.view.stat_columns().is_empty() {
+            return;
+        }
+        self.sort = match self.sort {
+            Some(s) if s.col == self.col_cursor && s.descending => {
+                Some(SortState { col: self.col_cursor, descending: false })
+            }
+            Some(s) if s.col == self.col_cursor => None,
+            _ => Some(SortState { col: self.col_cursor, descending: true }),
+        };
+    }
+
+    fn rebuild(&mut self, result: &GameResult) {
+        let away_team = truncate_team(&result.away_id, 20);
+        let home_team = truncate_team(&result.home_id, 20);
+        match self.view {
+            View::BoxScore => {
+                self.boxscore_content = build_boxscore_lines(result, away_team, home_team, self.sort);
+            }
+            View::Batting => {
+                self.batting_content = build_adv_batting_lines(result, away_team, home_team, self.sort);
+            }
+            View::Pitching => {
+                self.pitching_content = build_pitching_lines(result, away_team, home_team, self.sort);
+            }
+            View::LittleLeague => {}
+        }
+    }
+}
+
+/// Extract a sortable f64 from batting stats for box score columns.
+fn boxscore_sort_val(b: &BattingStats, col: usize) -> f64 {
+    match col {
+        0 => f64::from(b.ab),
+        1 => f64::from(b.hits),
+        2 => b.avg.unwrap_or(-1.0),
+        3 => b.obp.unwrap_or(-1.0),
+        4 => b.slg.unwrap_or(-1.0),
+        5 => b.ops.unwrap_or(-1.0),
+        6 => f64::from(b.runs),
+        7 => f64::from(b.rbi),
+        8 => f64::from(b.bb),
+        9 => f64::from(b.k),
+        10 => f64::from(b.sb),
+        _ => 0.0,
+    }
+}
+
+/// Extract a sortable f64 from batting stats for advanced batting columns.
+fn batting_sort_val(b: &BattingStats, col: usize) -> f64 {
+    match col {
+        0 => f64::from(b.pa),
+        1 => b.woba.unwrap_or(-1.0),
+        2 => b.iso.unwrap_or(-1.0),
+        3 => b.babip.unwrap_or(-1.0),
+        4 => b.k_pct.unwrap_or(-1.0),
+        5 => b.bb_pct.unwrap_or(-1.0),
+        6 => b.qab_pct.unwrap_or(-1.0),
+        7 => b.p_pa.unwrap_or(-1.0),
+        8 => b.gb_pct.unwrap_or(-1.0),
+        9 => b.sb_pct.unwrap_or(-1.0),
+        _ => 0.0,
+    }
+}
+
+/// Extract a sortable f64 from pitching stats.
+fn pitching_sort_val(p: &PitchingStats, col: usize) -> f64 {
+    match col {
+        0 => p.ip.unwrap_or(-1.0),
+        1 => p.era.unwrap_or(-1.0),
+        2 => p.fip.unwrap_or(-1.0),
+        3 => p.whip.unwrap_or(-1.0),
+        4 => p.k9.unwrap_or(-1.0),
+        5 => p.bb9.unwrap_or(-1.0),
+        6 => p.k_pct.unwrap_or(-1.0),
+        7 => p.k_bb_pct.unwrap_or(-1.0),
+        8 => p.csw_pct.unwrap_or(-1.0),
+        9 => p.fps_pct.unwrap_or(-1.0),
+        _ => 0.0,
+    }
+}
+
+/// Sort a player vec by a column value extractor.
+fn sort_players<F>(players: &mut [&PlayerGameStats], sort: Option<SortState>, val_fn: F)
+where
+    F: Fn(&PlayerGameStats) -> f64,
+{
+    if let Some(s) = sort {
+        players.sort_by(|a, b| {
+            let va = val_fn(a);
+            let vb = val_fn(b);
+            if s.descending {
+                vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
+            }
+        });
     }
 }
 
@@ -272,9 +382,10 @@ fn cell(text: &str, width: usize, style: Style) -> Span<'static> {
     Span::styled(padded, style)
 }
 
-/// Build a fixed-width cell, left-aligned within the given width.
+/// Build a fixed-width cell, left-aligned and truncated within the given width.
 fn cell_left(text: &str, width: usize, style: Style) -> Span<'static> {
-    let padded = format!("{text:<width$}");
+    let truncated = truncate_team(text, width);
+    let padded = format!("{truncated:<width$}");
     Span::styled(padded, style)
 }
 
@@ -309,7 +420,7 @@ fn build_linescore_lines(
     let mut away_spans = vec![cell_left(away_team, team_w, bold)];
     for i in 0..num_innings {
         let val = away.get(i).copied().unwrap_or(0);
-        away_spans.push(cell(&val.to_string(), 4, int_style(val)));
+        away_spans.push(cell(&val.to_string(), 4, Style::default()));
     }
     away_spans.push(Span::styled("  \u{2502}  ", DIM_STYLE));
     away_spans.push(cell(
@@ -324,7 +435,7 @@ fn build_linescore_lines(
     for i in 0..num_innings {
         if i < home.len() {
             let val = home[i];
-            home_spans.push(cell(&val.to_string(), 4, int_style(val)));
+            home_spans.push(cell(&val.to_string(), 4, Style::default()));
         } else {
             // Home didn't bat this inning
             home_spans.push(cell("x", 4, DIM_STYLE));
@@ -423,6 +534,7 @@ fn build_boxscore_lines(
     result: &GameResult,
     away_team: &str,
     home_team: &str,
+    sort: Option<SortState>,
 ) -> Vec<Line<'static>> {
     let cols = BattingTableColumns::default();
     let mut lines = Vec::new();
@@ -437,7 +549,9 @@ fn build_boxscore_lines(
         TITLE_STYLE,
     )));
     lines.push(build_batting_header(&cols));
-    for p in team_batters(&result.player_stats, &result.away_id) {
+    let mut away = team_batters(&result.player_stats, &result.away_id);
+    sort_players(&mut away, sort, |p| boxscore_sort_val(&p.batting, sort.map_or(0, |s| s.col)));
+    for p in &away {
         lines.push(build_batting_row(p, &cols));
     }
     lines.push(Line::from(Span::styled(
@@ -453,7 +567,9 @@ fn build_boxscore_lines(
         TITLE_STYLE,
     )));
     lines.push(build_batting_header(&cols));
-    for p in team_batters(&result.player_stats, &result.home_id) {
+    let mut home = team_batters(&result.player_stats, &result.home_id);
+    sort_players(&mut home, sort, |p| boxscore_sort_val(&p.batting, sort.map_or(0, |s| s.col)));
+    for p in &home {
         lines.push(build_batting_row(p, &cols));
     }
     lines.push(Line::from(Span::styled(
@@ -519,6 +635,7 @@ fn build_adv_batting_lines(
     result: &GameResult,
     away_team: &str,
     home_team: &str,
+    sort: Option<SortState>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -528,7 +645,9 @@ fn build_adv_batting_lines(
         TITLE_STYLE,
     )));
     lines.push(build_adv_batting_header());
-    for p in team_batters(&result.player_stats, &result.away_id) {
+    let mut away = team_batters(&result.player_stats, &result.away_id);
+    sort_players(&mut away, sort, |p| batting_sort_val(&p.batting, sort.map_or(0, |s| s.col)));
+    for p in &away {
         lines.push(build_adv_batting_row(p));
     }
     lines.push(Line::from(""));
@@ -539,7 +658,9 @@ fn build_adv_batting_lines(
         TITLE_STYLE,
     )));
     lines.push(build_adv_batting_header());
-    for p in team_batters(&result.player_stats, &result.home_id) {
+    let mut home = team_batters(&result.player_stats, &result.home_id);
+    sort_players(&mut home, sort, |p| batting_sort_val(&p.batting, sort.map_or(0, |s| s.col)));
+    for p in &home {
         lines.push(build_adv_batting_row(p));
     }
 
@@ -603,6 +724,7 @@ fn build_pitching_lines(
     result: &GameResult,
     away_team: &str,
     home_team: &str,
+    sort: Option<SortState>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -612,7 +734,11 @@ fn build_pitching_lines(
         TITLE_STYLE,
     )));
     lines.push(build_pitching_header());
-    for p in team_pitchers(&result.player_stats, &result.away_id) {
+    let mut away = team_pitchers(&result.player_stats, &result.away_id);
+    sort_players(&mut away, sort, |p| {
+        p.pitching.as_ref().map_or(-1.0, |ps| pitching_sort_val(ps, sort.map_or(0, |s| s.col)))
+    });
+    for p in &away {
         lines.push(build_pitching_row(p));
     }
     lines.push(Line::from(""));
@@ -623,7 +749,11 @@ fn build_pitching_lines(
         TITLE_STYLE,
     )));
     lines.push(build_pitching_header());
-    for p in team_pitchers(&result.player_stats, &result.home_id) {
+    let mut home = team_pitchers(&result.player_stats, &result.home_id);
+    sort_players(&mut home, sort, |p| {
+        p.pitching.as_ref().map_or(-1.0, |ps| pitching_sort_val(ps, sort.map_or(0, |s| s.col)))
+    });
+    for p in &home {
         lines.push(build_pitching_row(p));
     }
 
@@ -732,7 +862,7 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, current_view: View, game_
                     .bg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else {
-                DIM_STYLE
+                Style::default().fg(Color::Gray)
             };
             let mut spans = Vec::new();
             if i > 0 {
@@ -773,7 +903,49 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         .border_style(DIM_STYLE)
         .padding(Padding::horizontal(1));
 
-    let body = Paragraph::new(content_lines.clone())
+    // Apply alternating row colors and column highlight at draw time
+    let mut lines = content_lines.clone();
+    let cols = app.view.stat_columns();
+    let highlight_span = if cols.is_empty() { None } else { Some(app.col_cursor + 1) };
+    let zebra_bg = Style::default().bg(Color::Indexed(236));
+    let mut data_row: usize = 0;
+
+    for line in &mut lines {
+        let is_header = line.spans.len() > 1
+            && line.spans.first().is_some_and(|s| s.style == HEADER_STYLE);
+        let is_data = line.spans.len() > 1 && !is_header;
+
+        // Highlight selected column in header rows + sort indicator
+        if is_header {
+            if let Some(idx) = highlight_span {
+                if let Some(span) = line.spans.get_mut(idx) {
+                    span.style = Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+                    // Append sort arrow if this column is sorted
+                    if let Some(s) = app.sort {
+                        if s.col == app.col_cursor {
+                            let arrow = if s.descending { "\u{25BC}" } else { "\u{25B2}" };
+                            span.content = format!("{}{arrow}", span.content.trim_end()).into();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Alternating row shading for data rows
+        if is_data {
+            if data_row % 2 == 1 {
+                for span in &mut line.spans {
+                    span.style = span.style.bg(Color::Indexed(236));
+                }
+                line.style = zebra_bg;
+            }
+            data_row += 1;
+        }
+    }
+
+    let body = Paragraph::new(lines)
         .block(body_block)
         .scroll((app.scroll, 0));
 
@@ -804,7 +976,9 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         spans.push(Span::styled("  \u{2190}\u{2192}/hl", HEADER_STYLE));
         spans.push(Span::styled(": stat  ", DIM_STYLE));
         spans.push(Span::styled("?", HEADER_STYLE));
-        spans.push(Span::styled(format!(": help [{label}]  "), DIM_STYLE));
+        spans.push(Span::styled(": help  ", DIM_STYLE));
+        spans.push(Span::styled("Enter", HEADER_STYLE));
+        spans.push(Span::styled(format!(": sort [{label}]  "), DIM_STYLE));
     }
 
     spans.push(Span::styled("q", HEADER_STYLE));
@@ -945,6 +1119,10 @@ fn run_tui(result: &GameResult, game_name: String) -> io::Result<()> {
                         if !app.view.stat_columns().is_empty() {
                             app.show_help = true;
                         }
+                    }
+                    KeyCode::Enter => {
+                        app.toggle_sort();
+                        app.rebuild(result);
                     }
                     KeyCode::Tab => {
                         let next = app.view.next();

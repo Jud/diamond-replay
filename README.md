@@ -1,6 +1,6 @@
 # diamond-replay
 
-Replay engine for baseball play-by-play event streams. 40+ stats per player, plus youth-specific analytics. Built for youth baseball.
+Replay engine for [GameChanger](https://gc.com) event streams. Parses the raw scoring data from GameChanger's play-by-play API and computes 40+ stats per player, plus youth-specific analytics. Built for youth baseball.
 
 ## CLI
 
@@ -15,7 +15,7 @@ Four TUI views: Box Score, Batting, Pitching, Little League. Press `?` on any st
 
 `--little-league` adds per-team youth stats: run sourcing, pace, baserunning chaos, free bases.
 
-`--no-steal-home` replays the game with steal-of-home attempts blocked. Runners stay at 3B but can still score on hits, walks, WP, and PB.
+`--no-steal-home` replays the game with steal-of-home attempts blocked. Runners stay at 3B but auto-score on any subsequent ball in play that doesn't end the inning, plus walks, WP, and PB.
 
 ## Library
 
@@ -62,7 +62,11 @@ diamond-replay = { git = "https://github.com/Jud/diamond-replay" }
 
 ## Input format
 
-JSON arrays of scoring events with `sequence_number`, `event_data` (JSON string), and optional timestamps. See `testdata/` for 14 complete game files.
+GameChanger game stream data: JSON arrays of scoring events from the GameChanger API. Each event has a `sequence_number`, an `event_data` JSON string containing the play details (pitches, BIP, base running, lineups), and optional `created_at` timestamps.
+
+Events map 1:1 to scorer actions in the GameChanger app. They can be single plays or bundled transactions (e.g., a pitch + ball-in-play + base-running result in one atomic group). The engine handles undo/redo corrections, manual score overrides, dropped third strikes, catcher interference, and short lineups.
+
+See `testdata/` for 14 complete game files from real 10U and 13U games.
 
 ## Test
 

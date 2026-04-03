@@ -178,6 +178,9 @@ pub struct GameState {
     pub auto_advance: Option<AutoAdvanceRecord>,
     pub pa_context: PAContext,
     pub error_runners: HashSet<String>,
+    /// Runners held at 3B by the no-steal-home filter. Should auto-score
+    /// on any BIP that doesn't end the inning.
+    pub held_at_third: HashSet<String>,
 }
 
 impl Default for GameState {
@@ -202,6 +205,7 @@ impl GameState {
             auto_advance: None,
             pa_context: PAContext::default(),
             error_runners: HashSet::new(),
+            held_at_third: HashSet::new(),
         }
     }
 
@@ -224,6 +228,7 @@ impl GameState {
         self.bases.clear_all();
         self.auto_advance = None;
         self.error_runners.clear();
+        self.held_at_third.clear();
     }
 
     #[must_use]
