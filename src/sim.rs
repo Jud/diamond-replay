@@ -3,13 +3,10 @@
 //! Transforms an undo-resolved event stream before feeding it to the
 //! core replay engine. The core engine stays pure with zero simulation hooks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Result;
 use crate::event::{attr_bool, attr_str, attr_usize, BrPlayType, PlayResult, RawApiEvent};
-
-/// Play types that represent chaos base advancement.
-const CHAOS_PLAY_TYPES: &[&str] = &["stole_base", "wild_pitch", "passed_ball"];
 
 /// Lightweight base/out tracker for the scenario compiler.
 ///
@@ -33,23 +30,50 @@ struct SimState {
     outs: i32,
     balls: i32,
     strikes: i32,
-    /// Runners whose position diverged from the real game due to a
-    /// blocked chaos advance. Scorer corrections for these runners
-    /// are dropped — auto-advance handles them instead.
     diverged: HashSet<String>,
+    // Lineup tracking for batter ID resolution
+    away_id: String,
+    home_id: String,
+    offense: String,
+    lineup: HashMap<(String, usize), String>, // (team, slot) → player ID
+    lineup_size: HashMap<String, usize>,
+    current_index: HashMap<String, usize>,
 }
 
 impl SimState {
     fn new() -> Self {
-        Self { bases: [None, None, None], outs: 0, balls: 0, strikes: 0, diverged: HashSet::new() }
+        Self {
+            bases: [None, None, None],
+            outs: 0,
+            balls: 0,
+            strikes: 0,
+            diverged: HashSet::new(),
+            away_id: String::new(),
+            home_id: String::new(),
+            offense: String::new(),
+            lineup: HashMap::new(),
+            lineup_size: HashMap::new(),
+            current_index: HashMap::new(),
+        }
+    }
+
+    fn current_batter(&self) -> Option<String> {
+        let idx = self.current_index.get(&self.offense).copied().unwrap_or(0);
+        self.lineup.get(&(self.offense.clone(), idx)).cloned()
+    }
+
+    fn advance_batter(&mut self) {
+        let size = self.lineup_size.get(&self.offense).copied().unwrap_or(1).max(1);
+        let idx = self.current_index.entry(self.offense.clone()).or_insert(0);
+        *idx = (*idx + 1) % size;
     }
 
     fn is_occupied(&self, base: usize) -> bool {
-        base >= 1 && base <= 3 && self.bases[base - 1].is_some()
+        (1..=3).contains(&base) && self.bases[base - 1].is_some()
     }
 
     fn set(&mut self, base: usize, id: Option<String>) {
-        if base >= 1 && base <= 3 {
+        if (1..=3).contains(&base) {
             self.bases[base - 1] = id;
         }
     }
@@ -69,6 +93,11 @@ impl SimState {
         self.balls = 0;
         self.strikes = 0;
         self.diverged.clear();
+        self.offense = if self.offense == self.away_id {
+            self.home_id.clone()
+        } else {
+            self.away_id.clone()
+        };
     }
 
     fn reset_count(&mut self) {
@@ -76,9 +105,9 @@ impl SimState {
         self.strikes = 0;
     }
 
-    /// Walk/HBP force-advance: push runners up, batter to 1st.
+    /// Walk/HBP force-advance: push runners up, place batter on 1B.
     fn apply_walk(&mut self) {
-        // 3B scores (cleared), 2B→3B if 1B occupied, 1B→2B
+        let batter = self.current_batter();
         if self.is_occupied(1) && self.is_occupied(2) && self.is_occupied(3) {
             self.set(3, None); // runner scores
         }
@@ -90,11 +119,13 @@ impl SimState {
             let r1 = self.bases[0].take();
             self.set(2, r1);
         }
-        self.set(1, None); // batter to 1st (we don't track batter IDs)
+        self.set(1, batter);
+        self.advance_batter();
     }
 
-    /// Simplified auto-advance for hits. Batter goes to the appropriate base.
+    /// Auto-advance for hits. Places batter on the appropriate base.
     fn apply_hit(&mut self, play_result: &str) {
+        let batter = self.current_batter();
         match play_result {
             "single" => {
                 self.set(3, None); // 3B scores
@@ -102,25 +133,21 @@ impl SimState {
                 self.set(3, r2); // 2B→3B
                 let r1 = self.bases[0].take();
                 self.set(2, r1); // 1B→2B
-                // batter to 1B (no ID tracked, but mark occupied)
-                self.set(1, None);
+                self.set(1, batter);
             }
             "double" => {
                 self.set(3, None); // 3B scores
                 self.set(2, None); // 2B scores
                 let r1 = self.bases[0].take();
                 self.set(3, r1); // 1B→3B
-                self.set(2, None);
+                self.set(2, batter);
             }
-            "triple" => {
-                self.bases = [None, None, None];
-                self.set(3, None);
-            }
-            "home_run" => {
+            "triple" | "home_run" => {
                 self.bases = [None, None, None];
             }
             _ => {} // corrections follow via base_running
         }
+        self.advance_batter();
     }
 }
 
@@ -158,6 +185,46 @@ pub fn compile_no_steal_home(resolved: Vec<RawApiEvent>) -> Result<Vec<RawApiEve
             let attrs = sub.get("attributes").unwrap_or(&null);
 
             match code {
+                "set_teams" => {
+                    if let (Some(away), Some(home)) = (attr_str(attrs, "awayId"), attr_str(attrs, "homeId")) {
+                        state.away_id = away.to_string();
+                        state.home_id = home.to_string();
+                        state.offense = away.to_string();
+                    }
+                    new_sub_events.push(sub);
+                }
+
+                "fill_lineup_index" => {
+                    if let (Some(tid), Some(pid), Some(idx)) = (
+                        attr_str(attrs, "teamId"),
+                        attr_str(attrs, "playerId"),
+                        attr_usize(attrs, "index"),
+                    ) {
+                        state.lineup.insert((tid.to_string(), idx), pid.to_string());
+                        let size = state.lineup_size.entry(tid.to_string()).or_insert(0);
+                        if idx + 1 > *size {
+                            *size = idx + 1;
+                        }
+                    }
+                    new_sub_events.push(sub);
+                }
+
+                "fill_lineup" => {
+                    if let (Some(tid), Some(pid)) = (attr_str(attrs, "teamId"), attr_str(attrs, "playerId")) {
+                        let next_idx = state.lineup_size.get(tid).copied().unwrap_or(0);
+                        state.lineup.insert((tid.to_string(), next_idx), pid.to_string());
+                        *state.lineup_size.entry(tid.to_string()).or_insert(0) = next_idx + 1;
+                    }
+                    new_sub_events.push(sub);
+                }
+
+                "goto_lineup_index" => {
+                    if let (Some(tid), Some(idx)) = (attr_str(attrs, "teamId"), attr_usize(attrs, "index")) {
+                        state.current_index.insert(tid.to_string(), idx);
+                    }
+                    new_sub_events.push(sub);
+                }
+
                 "pitch" => {
                     if attr_bool(attrs, "advancesCount", true) {
                         let result = attr_str(attrs, "result").unwrap_or("");
@@ -174,6 +241,7 @@ pub fn compile_no_steal_home(resolved: Vec<RawApiEvent>) -> Result<Vec<RawApiEve
                                 if state.strikes >= 3 {
                                     state.outs += 1;
                                     state.reset_count();
+                                    state.advance_batter();
                                     if state.outs >= 3 {
                                         need_switch = true;
                                     }
@@ -202,21 +270,23 @@ pub fn compile_no_steal_home(resolved: Vec<RawApiEvent>) -> Result<Vec<RawApiEve
                     if PlayResult::parse(pr).is_batter_out() {
                         let added = if pr == "double_play" { 2 } else { 1 };
                         state.outs += added;
+                        state.advance_batter();
                         if state.outs >= 3 {
                             need_switch = true;
                         }
                     } else {
-                        state.apply_hit(pr);
+                        state.apply_hit(pr); // advances batter internally
                     }
                     new_sub_events.push(sub);
                 }
 
                 "base_running" => {
                     let pt = attr_str(attrs, "playType").unwrap_or("");
+                    let br_type = BrPlayType::parse(pt);
                     let base = attr_usize(attrs, "base");
                     let runner_id = attr_str(attrs, "runnerId").map(str::to_string);
 
-                    if CHAOS_PLAY_TYPES.contains(&pt) {
+                    if br_type.is_chaos() {
                         let blocked = match base {
                             Some(4) => true, // never score on chaos
                             Some(b @ 1..=3) => state.is_occupied(b), // block if no room
@@ -242,13 +312,12 @@ pub fn compile_no_steal_home(resolved: Vec<RawApiEvent>) -> Result<Vec<RawApiEve
                     // Their position in our sim differs from the real game,
                     // so scorer corrections would undo correct auto-advances.
                     if let Some(rid) = &runner_id {
-                        if state.diverged.contains(rid) && !BrPlayType::parse(pt).is_out() {
+                        if state.diverged.contains(rid) && !br_type.is_out() {
                             continue; // drop stale correction
                         }
                     }
 
-                    // Non-chaos: out types
-                    if BrPlayType::parse(pt).is_out() {
+                    if br_type.is_out() {
                         if let Some(rid) = &runner_id {
                             state.remove_runner(rid);
                             state.diverged.remove(rid);

@@ -205,6 +205,11 @@ impl BrPlayType {
             Self::CaughtStealing | Self::OutOnLastPlay | Self::PickedOff | Self::OtherOut
         )
     }
+
+    #[must_use]
+    pub fn is_chaos(self) -> bool {
+        matches!(self, Self::StoleBase | Self::WildPitch | Self::PassedBall)
+    }
 }
 
 /// The cause field on dropped-third-strike `ball_in_play` events.
