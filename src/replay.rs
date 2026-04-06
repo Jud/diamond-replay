@@ -764,25 +764,6 @@ fn handle_bip_out(
         }
     }
 
-    // Auto-score runners held at 3B by the no-steal-home filter.
-    // In the real game the runner had already scored, so the scorer
-    // didn't tag this out as a sac fly / productive out. Score them
-    // on any BIP that doesn't end the inning.
-    if r.state.outs < 3 && !r.state.held_at_third.is_empty() && r.state.bases.is_occupied(3) {
-        if let Some(occ) = r.state.bases.get(3).clone() {
-            let rid = match &occ {
-                crate::state::BaseOccupant::Player(id) => Some(id.clone()),
-                crate::state::BaseOccupant::Anonymous => None,
-            };
-            if rid.as_ref().is_some_and(|id| r.state.held_at_third.contains(id)) {
-                auto_score(r, 3, &mut AutoAdvanceRecord::default());
-                if let Some(id) = &rid {
-                    r.state.held_at_third.remove(id);
-                }
-            }
-        }
-    }
-
     r.state.outs >= 3
 }
 
@@ -1349,7 +1330,7 @@ fn build_dead_time(gaps: &[f64]) -> Vec<f64> {
 ///
 /// Returns an error if the event list is empty, teams are not set,
 /// or any event data fails to parse as JSON.
-pub fn replay_game(resolved: &[RawApiEvent], config: &crate::filter::ReplayConfig) -> Result<GameResult> {
+pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
     if resolved.is_empty() {
         return Err(ReplayError::NoEvents);
     }
@@ -1364,26 +1345,7 @@ pub fn replay_game(resolved: &[RawApiEvent], config: &crate::filter::ReplayConfi
         };
 
         let mut need_switch = false;
-        for orig_evt in &sub_events {
-            // Per-sub-event filter against live state
-            let filtered = config.apply(orig_evt, &r.state);
-            let evt = match &filtered {
-                Some(e) => e,
-                None => continue,
-            };
-
-            // Detect scoring-from-3B rewritten to remained-at-3B by filter.
-            // Flag the runner so they auto-score on the next BIP.
-            if orig_evt.code == "base_running"
-                && attr_usize(&orig_evt.attributes, "base") == Some(4)
-                && attr_str(&evt.attributes, "playType") == Some("remained_on_last_play")
-                && attr_usize(&evt.attributes, "base") == Some(3)
-            {
-                if let Some(rid) = attr_str(&evt.attributes, "runnerId") {
-                    r.state.held_at_third.insert(rid.to_string());
-                }
-            }
-
+        for evt in &sub_events {
             if let Some(ts) = evt.created_at {
                 r.record_ts(ts);
             }

@@ -1,0 +1,454 @@
+//! Scenario compiler for game simulations.
+//!
+//! Transforms an undo-resolved event stream before feeding it to the
+//! core replay engine. The core engine stays pure with zero simulation hooks.
+
+use std::collections::HashSet;
+
+use crate::error::Result;
+use crate::event::{attr_bool, attr_str, attr_usize, BrPlayType, PlayResult, RawApiEvent};
+
+/// Play types that represent chaos base advancement.
+const CHAOS_PLAY_TYPES: &[&str] = &["stole_base", "wild_pitch", "passed_ball"];
+
+/// Lightweight base/out tracker for the scenario compiler.
+///
+/// ```text
+/// Decision logic for chaos base_running events:
+///
+///   base=4 (home)?  → ALWAYS block. Runner stays at 3rd.
+///   base=2 or 3?    → Block if destination is occupied (no room).
+///                      Allow if destination is empty.
+///   base=1?         → Allow (steals to 1st don't happen, but be safe).
+///
+/// Everything else (hits, walks, normal advances) passes through
+/// unchanged. The core engine's auto-advance and walk force-advance
+/// score runs naturally when bases load up.
+///
+/// Scorer corrections for diverged runners (whose chaos advance was
+/// blocked) are dropped so they don't undo the sim's auto-advance.
+/// ```
+struct SimState {
+    bases: [Option<String>; 3], // 0=1B, 1=2B, 2=3B
+    outs: i32,
+    balls: i32,
+    strikes: i32,
+    /// Runners whose position diverged from the real game due to a
+    /// blocked chaos advance. Scorer corrections for these runners
+    /// are dropped — auto-advance handles them instead.
+    diverged: HashSet<String>,
+}
+
+impl SimState {
+    fn new() -> Self {
+        Self { bases: [None, None, None], outs: 0, balls: 0, strikes: 0, diverged: HashSet::new() }
+    }
+
+    fn is_occupied(&self, base: usize) -> bool {
+        base >= 1 && base <= 3 && self.bases[base - 1].is_some()
+    }
+
+    fn set(&mut self, base: usize, id: Option<String>) {
+        if base >= 1 && base <= 3 {
+            self.bases[base - 1] = id;
+        }
+    }
+
+    fn remove_runner(&mut self, rid: &str) {
+        for b in 0..3 {
+            if self.bases[b].as_deref() == Some(rid) {
+                self.bases[b] = None;
+                break;
+            }
+        }
+    }
+
+    fn switch_half(&mut self) {
+        self.bases = [None, None, None];
+        self.outs = 0;
+        self.balls = 0;
+        self.strikes = 0;
+        self.diverged.clear();
+    }
+
+    fn reset_count(&mut self) {
+        self.balls = 0;
+        self.strikes = 0;
+    }
+
+    /// Walk/HBP force-advance: push runners up, batter to 1st.
+    fn apply_walk(&mut self) {
+        // 3B scores (cleared), 2B→3B if 1B occupied, 1B→2B
+        if self.is_occupied(1) && self.is_occupied(2) && self.is_occupied(3) {
+            self.set(3, None); // runner scores
+        }
+        if self.is_occupied(1) && self.is_occupied(2) {
+            let r2 = self.bases[1].take();
+            self.set(3, r2);
+        }
+        if self.is_occupied(1) {
+            let r1 = self.bases[0].take();
+            self.set(2, r1);
+        }
+        self.set(1, None); // batter to 1st (we don't track batter IDs)
+    }
+
+    /// Simplified auto-advance for hits. Batter goes to the appropriate base.
+    fn apply_hit(&mut self, play_result: &str) {
+        match play_result {
+            "single" => {
+                self.set(3, None); // 3B scores
+                let r2 = self.bases[1].take();
+                self.set(3, r2); // 2B→3B
+                let r1 = self.bases[0].take();
+                self.set(2, r1); // 1B→2B
+                // batter to 1B (no ID tracked, but mark occupied)
+                self.set(1, None);
+            }
+            "double" => {
+                self.set(3, None); // 3B scores
+                self.set(2, None); // 2B scores
+                let r1 = self.bases[0].take();
+                self.set(3, r1); // 1B→3B
+                self.set(2, None);
+            }
+            "triple" => {
+                self.bases = [None, None, None];
+                self.set(3, None);
+            }
+            "home_run" => {
+                self.bases = [None, None, None];
+            }
+            _ => {} // corrections follow via base_running
+        }
+    }
+}
+
+/// Compile the no-steal-home scenario. Chaos base-running events are
+/// blocked when they would score (base=4) or when the destination base
+/// is already occupied. Runners only score via hits or walk force-advance.
+///
+/// # Errors
+///
+/// Returns an error if any `event_data` fails to parse as JSON.
+#[allow(clippy::too_many_lines)]
+pub fn compile_no_steal_home(resolved: Vec<RawApiEvent>) -> Result<Vec<RawApiEvent>> {
+    let mut state = SimState::new();
+    let mut output = Vec::with_capacity(resolved.len());
+
+    for raw in resolved {
+        let mut ed: serde_json::Value = serde_json::from_str(&raw.event_data)?;
+
+        let is_transaction = ed.get("events").is_some();
+        let sub_events = if is_transaction {
+            ed.get_mut("events")
+                .and_then(|v| v.as_array_mut())
+                .map(std::mem::take)
+                .unwrap_or_default()
+        } else {
+            vec![ed.clone()]
+        };
+
+        let mut new_sub_events: Vec<serde_json::Value> = Vec::with_capacity(sub_events.len());
+        let mut need_switch = false;
+
+        for sub in sub_events {
+            let code = attr_str(&sub, "code").unwrap_or("");
+            let null = serde_json::Value::Null;
+            let attrs = sub.get("attributes").unwrap_or(&null);
+
+            match code {
+                "pitch" => {
+                    if attr_bool(attrs, "advancesCount", true) {
+                        let result = attr_str(attrs, "result").unwrap_or("");
+                        match result {
+                            "ball" => {
+                                state.balls += 1;
+                                if state.balls >= 4 {
+                                    state.apply_walk();
+                                    state.reset_count();
+                                }
+                            }
+                            "strike_swinging" | "strike_looking" => {
+                                state.strikes += 1;
+                                if state.strikes >= 3 {
+                                    state.outs += 1;
+                                    state.reset_count();
+                                    if state.outs >= 3 {
+                                        need_switch = true;
+                                    }
+                                }
+                            }
+                            "foul" => {
+                                if state.strikes < 2 {
+                                    state.strikes += 1;
+                                }
+                            }
+                            "hit_by_pitch" => {
+                                state.apply_walk();
+                                state.reset_count();
+                            }
+                            "ball_in_play" => {
+                                state.reset_count();
+                            }
+                            _ => {}
+                        }
+                    }
+                    new_sub_events.push(sub);
+                }
+
+                "ball_in_play" => {
+                    let pr = attr_str(attrs, "playResult").unwrap_or("");
+                    if PlayResult::parse(pr).is_batter_out() {
+                        let added = if pr == "double_play" { 2 } else { 1 };
+                        state.outs += added;
+                        if state.outs >= 3 {
+                            need_switch = true;
+                        }
+                    } else {
+                        state.apply_hit(pr);
+                    }
+                    new_sub_events.push(sub);
+                }
+
+                "base_running" => {
+                    let pt = attr_str(attrs, "playType").unwrap_or("");
+                    let base = attr_usize(attrs, "base");
+                    let runner_id = attr_str(attrs, "runnerId").map(str::to_string);
+
+                    if CHAOS_PLAY_TYPES.contains(&pt) {
+                        let blocked = match base {
+                            Some(4) => true, // never score on chaos
+                            Some(b @ 1..=3) => state.is_occupied(b), // block if no room
+                            _ => false,
+                        };
+                        if blocked {
+                            // Mark runner as diverged from real game state
+                            if let Some(rid) = &runner_id {
+                                state.diverged.insert(rid.clone());
+                            }
+                            continue; // drop the event
+                        }
+                        // Allowed chaos advance (destination empty): update state
+                        if let (Some(rid), Some(b)) = (&runner_id, base) {
+                            state.remove_runner(rid);
+                            state.set(b, Some(rid.clone()));
+                        }
+                        new_sub_events.push(sub);
+                        continue;
+                    }
+
+                    // Drop scorer corrections for diverged runners.
+                    // Their position in our sim differs from the real game,
+                    // so scorer corrections would undo correct auto-advances.
+                    if let Some(rid) = &runner_id {
+                        if state.diverged.contains(rid) && !BrPlayType::parse(pt).is_out() {
+                            continue; // drop stale correction
+                        }
+                    }
+
+                    // Non-chaos: out types
+                    if BrPlayType::parse(pt).is_out() {
+                        if let Some(rid) = &runner_id {
+                            state.remove_runner(rid);
+                            state.diverged.remove(rid);
+                        }
+                        state.outs += 1;
+                        if state.outs >= 3 {
+                            need_switch = true;
+                        }
+                        new_sub_events.push(sub);
+                        continue;
+                    }
+
+                    // Non-chaos: normal advance (ground truth correction)
+                    if let (Some(rid), Some(b)) = (&runner_id, base) {
+                        state.remove_runner(rid);
+                        if (1..=3).contains(&b) {
+                            state.set(b, Some(rid.clone()));
+                        }
+                    }
+                    new_sub_events.push(sub);
+                }
+
+                "end_half" => {
+                    state.switch_half();
+                    need_switch = false;
+                    new_sub_events.push(sub);
+                }
+
+                _ => {
+                    new_sub_events.push(sub);
+                }
+            }
+        }
+
+        if need_switch {
+            state.switch_half();
+        }
+
+        // Rebuild event_data JSON
+        let new_event_data = if is_transaction {
+            if let Some(obj) = ed.as_object_mut() {
+                obj.insert("events".into(), serde_json::Value::Array(new_sub_events));
+            }
+            serde_json::to_string(&ed)?
+        } else if let Some(single) = new_sub_events.into_iter().next() {
+            serde_json::to_string(&single)?
+        } else {
+            continue;
+        };
+
+        output.push(RawApiEvent {
+            id: raw.id,
+            stream_id: raw.stream_id,
+            sequence_number: raw.sequence_number,
+            event_data: new_event_data,
+        });
+    }
+
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw_single(seq: i64, sub: serde_json::Value) -> RawApiEvent {
+        RawApiEvent {
+            id: format!("test-{seq}"),
+            stream_id: "test".into(),
+            sequence_number: seq,
+            event_data: serde_json::to_string(&sub).unwrap(),
+        }
+    }
+
+    fn raw_tx(seq: i64, subs: Vec<serde_json::Value>) -> RawApiEvent {
+        let tx = serde_json::json!({"code": "transaction", "events": subs});
+        RawApiEvent {
+            id: format!("test-{seq}"),
+            stream_id: "test".into(),
+            sequence_number: seq,
+            event_data: serde_json::to_string(&tx).unwrap(),
+        }
+    }
+
+    fn pitch(result: &str) -> serde_json::Value {
+        serde_json::json!({"code": "pitch", "attributes": {"result": result, "advancesCount": true}})
+    }
+
+    fn bip(play_result: &str) -> serde_json::Value {
+        serde_json::json!({"code": "ball_in_play", "attributes": {"playResult": play_result}})
+    }
+
+    fn base_running(play_type: &str, base: u64, runner_id: &str) -> serde_json::Value {
+        serde_json::json!({"code": "base_running", "attributes": {"playType": play_type, "base": base, "runnerId": runner_id}})
+    }
+
+    fn end_half() -> serde_json::Value {
+        serde_json::json!({"code": "end_half", "attributes": {}})
+    }
+
+    #[test]
+    fn chaos_scoring_always_blocked() {
+        let events = vec![
+            raw_single(1, base_running("advanced_on_last_play", 3, "r1")),
+            raw_single(2, base_running("passed_ball", 4, "r1")),
+        ];
+        let result = compile_no_steal_home(events).unwrap();
+        assert_eq!(result.len(), 1, "PB to home dropped");
+    }
+
+    #[test]
+    fn chaos_advance_allowed_when_destination_empty() {
+        let events = vec![
+            raw_single(1, base_running("advanced_on_last_play", 1, "r1")),
+            raw_single(2, base_running("passed_ball", 2, "r1")), // 2B empty, allowed
+        ];
+        let result = compile_no_steal_home(events).unwrap();
+        assert_eq!(result.len(), 2, "PB to empty 2B allowed");
+    }
+
+    #[test]
+    fn chaos_advance_blocked_when_destination_occupied() {
+        let events = vec![
+            raw_single(1, base_running("advanced_on_last_play", 2, "r1")),
+            raw_single(2, base_running("advanced_on_last_play", 3, "r2")),
+            // r2 on 3rd, PB to home blocked. r1 on 2nd, PB to 3rd blocked (occupied).
+            raw_single(3, base_running("passed_ball", 4, "r2")), // blocked
+            raw_single(4, base_running("passed_ball", 3, "r1")), // blocked (3B occupied)
+        ];
+        let result = compile_no_steal_home(events).unwrap();
+        assert_eq!(result.len(), 2, "both chaos advances blocked");
+    }
+
+    #[test]
+    fn bases_load_and_walk_forces_run() {
+        // Simulate: 3 runners get on via advances, PB scoring blocked,
+        // then walks should force runs via the core engine
+        let events = vec![
+            raw_single(1, base_running("advanced_on_last_play", 1, "r1")),
+            raw_single(2, base_running("advanced_on_last_play", 2, "r2")),
+            raw_single(3, base_running("advanced_on_last_play", 3, "r3")),
+            raw_single(4, base_running("stole_base", 4, "r3")), // blocked
+            // r3 still on 3rd. Bases loaded (r1=1B, r2=2B, r3=3B)
+            // Walk should force r3 home via core engine
+            raw_single(5, pitch("ball")),
+            raw_single(6, pitch("ball")),
+            raw_single(7, pitch("ball")),
+            raw_single(8, pitch("ball")),
+        ];
+        let result = compile_no_steal_home(events).unwrap();
+        // Event 4 (steal to home) should be dropped
+        assert_eq!(result.len(), 7);
+    }
+
+    #[test]
+    fn non_chaos_events_pass_through() {
+        let events = vec![
+            raw_single(1, pitch("ball")),
+            raw_single(2, bip("single")),
+            raw_single(3, base_running("advanced_on_last_play", 3, "r1")),
+            raw_single(4, base_running("caught_stealing", 2, "r2")),
+        ];
+        let result = compile_no_steal_home(events).unwrap();
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn half_inning_switch_clears_state() {
+        let events = vec![
+            raw_single(1, base_running("advanced_on_last_play", 3, "r1")),
+            raw_single(2, end_half()),
+            // After switch, 3B is empty so PB advance should be allowed
+            raw_single(3, base_running("advanced_on_last_play", 2, "r2")),
+            raw_single(4, base_running("passed_ball", 3, "r2")), // 3B empty, allowed
+        ];
+        let result = compile_no_steal_home(events).unwrap();
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn chaos_within_transaction() {
+        let events = vec![
+            raw_single(1, base_running("advanced_on_last_play", 3, "r1")),
+            raw_tx(2, vec![
+                base_running("passed_ball", 4, "r1"), // blocked
+                base_running("passed_ball", 3, "r2"), // blocked (3B occupied)
+            ]),
+        ];
+        let result = compile_no_steal_home(events).unwrap();
+        let ed: serde_json::Value = serde_json::from_str(&result[1].event_data).unwrap();
+        let tx_events = ed["events"].as_array().unwrap();
+        assert_eq!(tx_events.len(), 0, "both chaos events in tx dropped");
+    }
+
+    #[test]
+    fn sacrifice_fly_counted_as_out() {
+        let events = vec![
+            raw_tx(1, vec![bip("sacrifice_fly")]),
+        ];
+        let result = compile_no_steal_home(events).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+}

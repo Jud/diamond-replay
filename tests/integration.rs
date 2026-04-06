@@ -1,5 +1,4 @@
-use diamond_replay::filter::{NoStealHomeFilter, ReplayConfig};
-use diamond_replay::{replay_from_json, replay_from_json_with_config};
+use diamond_replay::{replay_from_json, replay_from_json_no_steal_home};
 use std::collections::HashMap;
 
 fn load_box_scores() -> HashMap<String, (Vec<i32>, Vec<i32>)> {
@@ -330,9 +329,7 @@ fn test_no_steal_home_reduces_runs() {
     let normal = replay_from_json(json).expect("normal replay");
     let normal_away: i32 = normal.linescore_away.iter().sum();
 
-    let mut config = ReplayConfig::default();
-    config.filters.push(Box::new(NoStealHomeFilter));
-    let simulated = replay_from_json_with_config(json, &config).expect("simulated replay");
+    let simulated = replay_from_json_no_steal_home(json).expect("simulated replay");
     let sim_away: i32 = simulated.linescore_away.iter().sum();
 
     // Mariners had 6 steals of home. Simulation should produce fewer or equal runs.

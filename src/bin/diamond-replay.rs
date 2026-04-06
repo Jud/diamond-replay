@@ -16,11 +16,10 @@ use ratatui::widgets::{
 };
 use ratatui::Terminal;
 
-use diamond_replay::filter::{NoStealHomeFilter, ReplayConfig};
 use diamond_replay::stat_help;
 use diamond_replay::player::{BattingStats, PitchingStats, PlayerGameStats};
 use diamond_replay::replay::{GameResult, LittleLeagueStats};
-use diamond_replay::{replay_from_json, replay_from_json_with_config};
+use diamond_replay::{replay_from_json, replay_from_json_no_steal_home};
 
 // ---------------------------------------------------------------------------
 // Style constants
@@ -1359,15 +1358,10 @@ fn main() {
         (data, name)
     };
 
-    let mut config = ReplayConfig::default();
-    if no_steal_home {
-        config.filters.push(Box::new(NoStealHomeFilter));
-    }
-
-    let result = if config.filters.is_empty() {
-        replay_from_json(&data)
+    let result = if no_steal_home {
+        replay_from_json_no_steal_home(&data)
     } else {
-        replay_from_json_with_config(&data, &config)
+        replay_from_json(&data)
     };
     let result = match result {
         Ok(r) => r,
