@@ -46,9 +46,17 @@ impl ReplayConfig {
     }
 }
 
-/// Suppress steals of home: runners attempting to steal home stay at 3B.
-/// Confirmation events for already-scored runners are dropped.
+/// Suppress all "chaos" scoring from 3B: steals, wild pitches, passed balls.
+/// Runners can only score on hits, walks, and HBP (i.e., from the BIP/walk
+/// auto-advance path). Confirmation events for already-scored runners are dropped.
 pub struct NoStealHomeFilter;
+
+/// Play types that represent chaos scoring from 3B (not hits or walks).
+const CHAOS_PLAY_TYPES: &[&str] = &[
+    "stole_base",
+    "wild_pitch",
+    "passed_ball",
+];
 
 impl EventFilter for NoStealHomeFilter {
     fn filter_event(&self, event: &SubEvent, state: &GameState) -> FilterAction {
@@ -57,7 +65,7 @@ impl EventFilter for NoStealHomeFilter {
         }
         let pt = attr_str(&event.attributes, "playType").unwrap_or("");
         let base = attr_usize(&event.attributes, "base");
-        if pt != "stole_base" || base != Some(4) {
+        if base != Some(4) || !CHAOS_PLAY_TYPES.contains(&pt) {
             return FilterAction::Keep;
         }
 
@@ -70,7 +78,7 @@ impl EventFilter for NoStealHomeFilter {
             .is_some_and(|rid| state.bases.find_by_id(rid).is_some());
 
         if on_bases {
-            // Real steal attempt. Rewrite: runner stays at 3B.
+            // Runner on bases: rewrite to stay at 3B.
             let mut new_evt = event.clone();
             let mut attrs = new_evt
                 .attributes
@@ -86,7 +94,7 @@ impl EventFilter for NoStealHomeFilter {
             FilterAction::Replace(new_evt)
         } else {
             // Runner not on bases: confirmation of already-scored runner.
-            // Drop it. No steal happened in our simulation.
+            // Drop it.
             FilterAction::Drop
         }
     }

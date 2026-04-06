@@ -1372,12 +1372,12 @@ pub fn replay_game(resolved: &[RawApiEvent], config: &crate::filter::ReplayConfi
                 None => continue,
             };
 
-            // Detect steal-of-home rewritten to remained-at-3B by filter.
+            // Detect scoring-from-3B rewritten to remained-at-3B by filter.
             // Flag the runner so they auto-score on the next BIP.
             if orig_evt.code == "base_running"
-                && attr_str(&orig_evt.attributes, "playType") == Some("stole_base")
                 && attr_usize(&orig_evt.attributes, "base") == Some(4)
                 && attr_str(&evt.attributes, "playType") == Some("remained_on_last_play")
+                && attr_usize(&evt.attributes, "base") == Some(3)
             {
                 if let Some(rid) = attr_str(&evt.attributes, "runnerId") {
                     r.state.held_at_third.insert(rid.to_string());

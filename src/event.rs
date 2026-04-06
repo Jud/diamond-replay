@@ -171,6 +171,7 @@ pub enum BrPlayType {
     DefensiveIndifference,
     AttemptedPickoff,
     OtherAdvance,
+    OtherOut,
     Unknown,
 }
 
@@ -192,6 +193,7 @@ impl BrPlayType {
             "defensive_indifference" => Self::DefensiveIndifference,
             "attempted_pickoff" => Self::AttemptedPickoff,
             "other_advance" => Self::OtherAdvance,
+            "other_out" => Self::OtherOut,
             _ => Self::Unknown,
         }
     }
@@ -200,7 +202,7 @@ impl BrPlayType {
     pub fn is_out(self) -> bool {
         matches!(
             self,
-            Self::CaughtStealing | Self::OutOnLastPlay | Self::PickedOff
+            Self::CaughtStealing | Self::OutOnLastPlay | Self::PickedOff | Self::OtherOut
         )
     }
 }
