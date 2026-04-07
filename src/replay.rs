@@ -43,9 +43,14 @@ pub struct GameResult {
     pub linescore_away: Vec<i32>,
     pub linescore_home: Vec<i32>,
     pub first_timestamp: Option<i64>,
+    pub first_pitch_timestamp: Option<i64>,
+    pub last_pitch_timestamp: Option<i64>,
     pub last_timestamp: Option<i64>,
     pub transition_gaps: Vec<f64>,
     pub dead_time_per_inning: Vec<f64>,
+    /// Duration of each full inning in minutes (first event of top half
+    /// to last event of bottom half, including transition time).
+    pub inning_durations: Vec<f64>,
     pub player_stats: HashMap<String, PlayerGameStats>,
     pub away_batting: BattingStats,
     pub home_batting: BattingStats,
@@ -67,6 +72,8 @@ struct Replay {
     half_first_ts: HashMap<usize, i64>,
     half_last_ts: HashMap<usize, i64>,
     first_ts: Option<i64>,
+    first_pitch_ts: Option<i64>,
+    last_pitch_ts: Option<i64>,
     last_ts: Option<i64>,
     players: PlayerTracker,
     away_ll: LittleLeagueStats,
@@ -91,6 +98,8 @@ impl Replay {
             half_first_ts: HashMap::new(),
             half_last_ts: HashMap::new(),
             first_ts: None,
+            first_pitch_ts: None,
+            last_pitch_ts: None,
             last_ts: None,
             players: PlayerTracker::new(),
             away_ll: LittleLeagueStats::default(),
@@ -1275,6 +1284,16 @@ fn aggregate(replay: Replay) -> GameResult {
     let gaps = build_transition_gaps(num_hi, &replay.half_first_ts, &replay.half_last_ts);
     let dead = build_dead_time(&gaps);
 
+    // Per-inning duration: first event of top half to last event of bottom half
+    let num_full_innings = num_hi / 2;
+    let inning_durations: Vec<f64> = (0..num_full_innings)
+        .filter_map(|i| {
+            let top_start = replay.half_first_ts.get(&(i * 2))?;
+            let bot_end = replay.half_last_ts.get(&(i * 2 + 1))?;
+            Some(f64::from(i32::try_from(bot_end - top_start).unwrap_or(0)) / 60_000.0)
+        })
+        .collect();
+
     GameResult {
         home_id: replay.state.home_id,
         away_id: replay.state.away_id,
@@ -1285,9 +1304,12 @@ fn aggregate(replay: Replay) -> GameResult {
             .map(|i| replay.runs_by_half.get(&(i * 2 + 1)).copied().unwrap_or(0))
             .collect(),
         first_timestamp: replay.first_ts,
+        first_pitch_timestamp: replay.first_pitch_ts,
+        last_pitch_timestamp: replay.last_pitch_ts,
         last_timestamp: replay.last_ts,
         transition_gaps: gaps,
         dead_time_per_inning: dead,
+        inning_durations,
         player_stats,
         away_batting,
         home_batting,
@@ -1392,7 +1414,13 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                     }
                     false
                 }
-                "pitch" => handle_pitch(&mut r, &evt.attributes),
+                "pitch" => {
+                    if let Some(ts) = evt.created_at {
+                        if r.first_pitch_ts.is_none() { r.first_pitch_ts = Some(ts); }
+                        r.last_pitch_ts = Some(ts);
+                    }
+                    handle_pitch(&mut r, &evt.attributes)
+                }
                 "ball_in_play" => handle_ball_in_play(&mut r, &evt.attributes),
                 "base_running" => handle_base_running(&mut r, &evt.attributes),
                 "end_at_bat" => {

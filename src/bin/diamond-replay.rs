@@ -1284,8 +1284,10 @@ fn dump_json(result: &GameResult, game_name: &str, include_ll: bool) {
         "transition_gaps": result.transition_gaps,
         "dead_time_per_inning": result.dead_time_per_inning,
         "first_timestamp": result.first_timestamp,
+        "first_pitch_timestamp": result.first_pitch_timestamp,
+        "last_pitch_timestamp": result.last_pitch_timestamp,
         "last_timestamp": result.last_timestamp,
-        "duration_min": result.first_timestamp.zip(result.last_timestamp)
+        "duration_min": result.first_pitch_timestamp.zip(result.last_pitch_timestamp)
             .map(|(f, l)| f64::from(i32::try_from(l - f).unwrap_or(i32::MAX)) / 60_000.0),
     });
     if include_ll {
@@ -1293,6 +1295,18 @@ fn dump_json(result: &GameResult, game_name: &str, include_ll: bool) {
         let home_inn_bat = i32::try_from(result.linescore_home.len()).unwrap_or(0);
 
         let obj = output.as_object_mut().unwrap();
+
+        // Per-inning duration (game-level, not per-team)
+        let durations = &result.inning_durations;
+        let avg_inning_min = if durations.is_empty() {
+            0.0
+        } else {
+            (durations.iter().sum::<f64>() / durations.len() as f64 * 10.0).round() / 10.0
+        };
+        obj.insert("inning_durations_min".into(), serde_json::json!(
+            durations.iter().map(|d| (d * 10.0).round() / 10.0).collect::<Vec<_>>()
+        ));
+        obj.insert("avg_inning_min".into(), serde_json::json!(avg_inning_min));
         obj.insert("teams".to_string(), serde_json::json!({
             result.away_id.clone(): build_ll_team_json(
                 &result.away_batting, &result.away_pitching, &result.home_pitching,
