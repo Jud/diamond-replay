@@ -143,6 +143,17 @@ impl BaseState {
         }
         self.clear_fallback(dest_base)
     }
+
+    /// Replace one runner with another on the bases (player substitution).
+    pub fn substitute_runner(&mut self, old_id: &str, new_id: &str) {
+        for occ in &mut self.bases {
+            if let Some(BaseOccupant::Player(pid)) = occ {
+                if pid == old_id {
+                    *pid = new_id.to_string();
+                }
+            }
+        }
+    }
 }
 
 /// Tracks which runners were auto-scored during eager auto-advance.

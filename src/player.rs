@@ -4,6 +4,31 @@ use crate::event::{BipPlayType, BrPlayType, PitchResult, PlayResult};
 use crate::state::PAContext;
 
 // ---------------------------------------------------------------------------
+// Spray chart entry — one per ball in play with location data
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DefenderInfo {
+    pub position: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub error: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SprayEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+    pub result: String,
+    pub bip_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hr_location: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub defenders: Vec<DefenderInfo>,
+}
+
+// ---------------------------------------------------------------------------
 // Per-player stat structs
 // ---------------------------------------------------------------------------
 
@@ -37,6 +62,10 @@ pub struct BattingStats {
     pub competitive_ab: i32,
     pub sb: i32,
     pub cs: i32,
+
+    // Spray chart data (one entry per BIP with location)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spray_chart: Vec<SprayEntry>,
 
     // Derived integer fields (computed after replay)
     pub ab: i32,
@@ -236,6 +265,94 @@ impl PlayerTracker {
         }
     }
 
+    /// Remove a lineup slot and shift higher indices down by one.
+    /// GC fires this after `clear_lineup_index` to compact the lineup
+    /// when a player is removed mid-game.
+    pub fn handle_squash_lineup(&mut self, team_id: &str, removed_index: usize) {
+        let size = self.lineup_size.get(team_id).copied().unwrap_or(0);
+        if removed_index >= size {
+            return;
+        }
+        self.lineup.remove(&(team_id.to_string(), removed_index));
+        for i in (removed_index + 1)..size {
+            if let Some(pid) = self.lineup.remove(&(team_id.to_string(), i)) {
+                self.lineup.insert((team_id.to_string(), i - 1), pid);
+            }
+        }
+        let new_size = size - 1;
+        self.lineup_size.insert(team_id.to_string(), new_size);
+        // Adjust current batting index: if it pointed at or past the removed
+        // slot, shift it so the next batter stays correct.
+        if let Some(idx) = self.current_index.get_mut(team_id) {
+            if *idx >= new_size && new_size > 0 {
+                *idx %= new_size;
+            } else if *idx > removed_index && *idx > 0 {
+                *idx -= 1;
+            }
+        }
+    }
+
+    /// Move a player from one batting order position to another, shifting
+    /// intermediate positions. GC fires this when the scorer drags a player
+    /// in the lineup — it's an insert, not a swap.
+    pub fn handle_reorder_lineup(&mut self, team_id: &str, from_index: usize, to_index: usize) {
+        if from_index == to_index {
+            return;
+        }
+        let tid = team_id.to_string();
+        let moving = self.lineup.remove(&(tid.clone(), from_index));
+        if from_index < to_index {
+            // Moving down: shift indices from+1..=to up by one
+            for i in from_index..to_index {
+                if let Some(pid) = self.lineup.remove(&(tid.clone(), i + 1)) {
+                    self.lineup.insert((tid.clone(), i), pid);
+                }
+            }
+        } else {
+            // Moving up: shift indices to..from-1 down by one
+            for i in (to_index..from_index).rev() {
+                if let Some(pid) = self.lineup.remove(&(tid.clone(), i)) {
+                    self.lineup.insert((tid.clone(), i + 1), pid);
+                }
+            }
+        }
+        if let Some(pid) = moving {
+            self.lineup.insert((tid, to_index), pid);
+        }
+    }
+
+    /// Substitute one player for another. GC fires `sub_players` when a
+    /// coach makes a substitution. The incoming player takes the outgoing
+    /// player's lineup slot, field position, and (optionally) base.
+    pub fn handle_sub_players(
+        &mut self,
+        team_id: &str,
+        outgoing_id: &str,
+        incoming_id: &str,
+        _apply_to_baserunners: bool,
+    ) {
+        // Replace in lineup map
+        for (key, pid) in self.lineup.iter_mut() {
+            if key.0 == team_id && pid == outgoing_id {
+                *pid = incoming_id.to_string();
+            }
+        }
+        // Transfer team membership
+        self.player_team
+            .insert(incoming_id.to_string(), team_id.to_string());
+        // Transfer pitcher role if applicable
+        if self.current_pitcher.get(team_id).map(String::as_str) == Some(outgoing_id) {
+            self.current_pitcher
+                .insert(team_id.to_string(), incoming_id.to_string());
+            let stats = self.ensure_stats(incoming_id);
+            if stats.pitching.is_none() {
+                stats.pitching = Some(PitchingStats::default());
+            }
+        }
+        // The apply_to_baserunners flag is returned for the caller to handle
+        // (base state lives on Replay, not PlayerTracker).
+    }
+
     pub fn handle_goto(&mut self, team_id: &str, index: usize) {
         self.current_index.insert(team_id.to_string(), index);
     }
@@ -341,7 +458,13 @@ impl PlayerTracker {
     }
 
     /// Record a ball-in-play result for the current batter.
-    pub fn record_bip(&mut self, team_id: &str, play_result: PlayResult, bip_type: BipPlayType) {
+    pub fn record_bip(
+        &mut self,
+        team_id: &str,
+        play_result: PlayResult,
+        bip_type: BipPlayType,
+        spray: Option<SprayEntry>,
+    ) {
         self.with_batter(team_id, |s| {
             s.pa += 1;
             match play_result {
@@ -369,6 +492,9 @@ impl PlayerTracker {
                 }
                 BipPlayType::PopFly => s.pop_ups += 1,
                 BipPlayType::Other => {}
+            }
+            if let Some(entry) = spray {
+                s.spray_chart.push(entry);
             }
         });
         self.advance_batter(team_id);

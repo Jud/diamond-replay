@@ -291,3 +291,17 @@ pub fn attr_i32(attrs: &serde_json::Value, key: &str) -> Option<i32> {
     let v = attrs.get(key)?.as_i64()?;
     i32::try_from(v).ok()
 }
+
+/// Extract the hit location `(x, y)` from the first defender entry that has one.
+#[must_use]
+pub fn attr_hit_location(attrs: &serde_json::Value) -> Option<(f64, f64)> {
+    let defenders = attrs.get("defenders")?.as_array()?;
+    for d in defenders {
+        if let Some(loc) = d.get("location") {
+            let x = loc.get("x")?.as_f64()?;
+            let y = loc.get("y")?.as_f64()?;
+            return Some((x, y));
+        }
+    }
+    None
+}

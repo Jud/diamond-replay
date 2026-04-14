@@ -164,6 +164,46 @@ game_test!(
     "mariners_vs_tigers_apr1"
 );
 
+game_test!(
+    test_10u_mariners_brewers_apr12,
+    "10U_Mariners_Brewers_Apr12.json",
+    "10U_Mariners_Brewers_Apr12"
+);
+
+/// Regression: auto-scored runners must not be double-counted when the
+/// confirming base_running event arrives in a later transaction.
+#[test]
+fn test_auto_score_no_double_count() {
+    let json = include_str!("../testdata/10U_Mariners_Brewers_Apr12.json");
+    let result = replay_from_json(json).expect("replay should succeed");
+
+    let away_linescore: i32 = result.linescore_away.iter().sum();
+    let home_linescore: i32 = result.linescore_home.iter().sum();
+    let away_player_runs: i32 = result
+        .player_stats
+        .values()
+        .filter(|p| p.team_id == result.away_id)
+        .map(|p| p.batting.runs)
+        .sum();
+    let home_player_runs: i32 = result
+        .player_stats
+        .values()
+        .filter(|p| p.team_id == result.home_id)
+        .map(|p| p.batting.runs)
+        .sum();
+
+    assert_eq!(
+        away_player_runs, away_linescore,
+        "away player runs ({}) != linescore ({})",
+        away_player_runs, away_linescore
+    );
+    assert_eq!(
+        home_player_runs, home_linescore,
+        "home player runs ({}) != linescore ({})",
+        home_player_runs, home_linescore
+    );
+}
+
 #[test]
 fn test_player_stats_populated() {
     let json = include_str!("../testdata/13U_Braves_Padres.json");
