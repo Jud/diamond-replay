@@ -3,10 +3,12 @@ use std::collections::HashMap;
 use crate::compute;
 use crate::error::{ReplayError, Result};
 use crate::event::{
-    attr_bool, attr_i32, attr_str, attr_usize, BipCause, BipPlayType, BrPlayType, EventData,
-    PitchResult, PlayResult, RawApiEvent,
+    attr_bool, attr_hit_location, attr_i32, attr_str, attr_usize, BipCause, BipPlayType,
+    BrPlayType, EventData, PitchResult, PlayResult, RawApiEvent,
 };
-use crate::player::{BattingStats, PitchingStats, PlayerGameStats, PlayerTracker};
+use crate::player::{
+    BattingStats, DefenderInfo, PitchingStats, PlayerGameStats, PlayerTracker, SprayEntry,
+};
 use crate::score;
 use crate::state::{AutoAdvanceRecord, BaseOccupant, GameState};
 
@@ -84,8 +86,9 @@ struct Replay {
     pitch_pitches_since_last_bip_away: i32,
     /// Pitching-side: pitches thrown since last BIP (home team pitching)
     pitch_pitches_since_last_bip_home: i32,
-    /// Pending BIP run snapshot: (parity, runs_before, is_away_batting, is_real_bip)
-    /// is_real_bip=false for dropped third strikes (runs go to passive instead).
+    /// Pending BIP run snapshot:
+    /// `(parity, runs_before, is_away_batting, is_real_bip)`.
+    /// `is_real_bip=false` for dropped third strikes (runs go to passive instead).
     pending_bip_snapshot: Option<(usize, i32, bool, bool)>,
 }
 
@@ -152,32 +155,45 @@ impl Replay {
         }
     }
 
-    /// Push current count to pitches_between_bip and reset for both batting and pitching sides.
+    /// Push current count to `pitches_between_bip` and reset for both batting and pitching sides.
     fn flush_pitches_between_bip(&mut self) {
         if self.state.offense == self.state.away_id {
-            self.away_ll.pitches_between_bip.push(self.pitches_since_last_bip_away);
+            self.away_ll
+                .pitches_between_bip
+                .push(self.pitches_since_last_bip_away);
             self.pitches_since_last_bip_away = 0;
-            self.home_ll.pitches_between_bip_pitching.push(self.pitch_pitches_since_last_bip_home);
+            self.home_ll
+                .pitches_between_bip_pitching
+                .push(self.pitch_pitches_since_last_bip_home);
             self.pitch_pitches_since_last_bip_home = 0;
         } else {
-            self.home_ll.pitches_between_bip.push(self.pitches_since_last_bip_home);
+            self.home_ll
+                .pitches_between_bip
+                .push(self.pitches_since_last_bip_home);
             self.pitches_since_last_bip_home = 0;
-            self.away_ll.pitches_between_bip_pitching.push(self.pitch_pitches_since_last_bip_away);
+            self.away_ll
+                .pitches_between_bip_pitching
+                .push(self.pitch_pitches_since_last_bip_away);
             self.pitch_pitches_since_last_bip_away = 0;
         }
     }
 
     /// Resolve the pending BIP run snapshot after all corrections in the
-    /// transaction have been applied. The delta between runs_before and
-    /// runs_after (post-correction) is the true number of runs scored.
+    /// transaction have been applied. The delta between `runs_before` and
+    /// `runs_after` (post-correction) is the true number of runs scored.
     /// Uses the stored team identity so half-inning switches don't misattribute.
     fn resolve_bip_snapshot(&mut self) {
-        if let Some((parity, runs_before, is_away, is_real_bip)) = self.pending_bip_snapshot.take() {
+        if let Some((parity, runs_before, is_away, is_real_bip)) = self.pending_bip_snapshot.take()
+        {
             let hi = self.hi();
             let runs_after = team_run_total(&self.runs_by_half, hi, parity);
             let delta = runs_after - runs_before;
             if delta > 0 {
-                let ll = if is_away { &mut self.away_ll } else { &mut self.home_ll };
+                let ll = if is_away {
+                    &mut self.away_ll
+                } else {
+                    &mut self.home_ll
+                };
                 if is_real_bip {
                     ll.runs_on_bip += delta;
                 } else {
@@ -533,7 +549,13 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         PitchResult::Ball => {
             r.state.ball_count += 1;
             if r.state.ball_count >= 4 {
-                complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), ReachCause::Walk);
+                complete_walk_or_hbp(
+                    r,
+                    &offense,
+                    &defense,
+                    batter_id.as_deref(),
+                    ReachCause::Walk,
+                );
                 r.state.reset_count();
                 r.players.record_bb(&offense);
                 r.players.record_pitch_bb(&defense);
@@ -555,7 +577,13 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             false
         }
         PitchResult::HitByPitch => {
-            complete_walk_or_hbp(r, &offense, &defense, batter_id.as_deref(), ReachCause::HitByPitch);
+            complete_walk_or_hbp(
+                r,
+                &offense,
+                &defense,
+                batter_id.as_deref(),
+                ReachCause::HitByPitch,
+            );
             r.state.reset_count();
             r.players.record_hbp(&offense);
             r.players.record_pitch_hbp(&defense);
@@ -606,45 +634,51 @@ fn handle_strike(r: &mut Replay, result: PitchResult, attrs: &serde_json::Value)
 // Ball-in-play handling (eager auto-advance)
 // ---------------------------------------------------------------------------
 
+/// Context for recording batting/pitching stats for a BIP.
+struct BipStatContext<'a> {
+    offense: &'a str,
+    defense: &'a str,
+    batter_id: Option<&'a str>,
+    pa_is_qab: bool,
+    spray: Option<SprayEntry>,
+}
+
 /// Record batting/pitching stats for a BIP and classify as QAB if appropriate.
 fn record_bip_stats(
     r: &mut Replay,
     pr: PlayResult,
     bip_type: BipPlayType,
-    offense: &str,
-    defense: &str,
-    batter_id: Option<&str>,
-    pa_is_qab: bool,
+    ctx: BipStatContext<'_>,
 ) {
     if pr.is_dropped_third_strike() {
         let looking = r.state.last_strike_type.as_deref() == Some("strike_looking");
-        r.players.record_k(offense, looking);
-        r.players.record_pitch_k(defense);
+        r.players.record_k(ctx.offense, looking);
+        r.players.record_pitch_k(ctx.defense);
         if r.state.pa_context.pitches_after_two_strikes >= 3
             || r.state.pa_context.pitches_in_pa >= 6
         {
-            r.players.record_qab(offense);
+            r.players.record_qab(ctx.offense);
         }
     } else if !pr.is_batter_out() {
-        r.players.record_bip(offense, pr, bip_type);
+        r.players.record_bip(ctx.offense, pr, bip_type, ctx.spray);
         if pr.is_hit() {
-            r.players.record_pitch_hit(defense, pr, bip_type);
+            r.players.record_pitch_hit(ctx.defense, pr, bip_type);
         } else {
-            r.players.record_pitch_bip(defense, bip_type);
+            r.players.record_pitch_bip(ctx.defense, bip_type);
         }
-        if pa_is_qab {
-            r.players.record_qab(offense);
+        if ctx.pa_is_qab {
+            r.players.record_qab(ctx.offense);
         }
         if pr == PlayResult::Error {
-            if let Some(bid) = batter_id {
+            if let Some(bid) = ctx.batter_id {
                 r.state.error_runners.insert(bid.to_string());
             }
         }
     } else {
-        r.players.record_bip(offense, pr, bip_type);
-        r.players.record_pitch_bip(defense, bip_type);
-        if pa_is_qab {
-            r.players.record_qab(offense);
+        r.players.record_bip(ctx.offense, pr, bip_type, ctx.spray);
+        r.players.record_pitch_bip(ctx.defense, bip_type);
+        if ctx.pa_is_qab {
+            r.players.record_qab(ctx.offense);
         }
     }
 }
@@ -691,15 +725,49 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     r.state.auto_advance = None;
 
     let pr = PlayResult::parse(attr_str(attrs, "playResult").unwrap_or(""));
-    let bip_type = attr_str(attrs, "playType").map_or(BipPlayType::Other, BipPlayType::parse);
+    let play_type_str = attr_str(attrs, "playType").unwrap_or("");
+    let bip_type = if play_type_str.is_empty() {
+        BipPlayType::Other
+    } else {
+        BipPlayType::parse(play_type_str)
+    };
     let offense = r.state.offense.clone();
     let defense = r.defense_team().to_string();
     let batter_id = r.players.current_batter(&offense).map(str::to_string);
     r.track_hi();
 
+    let location = attr_hit_location(attrs);
+    let hr_location = attr_str(attrs, "hrLocation").map(str::to_string);
+    let mut defenders: Vec<DefenderInfo> = Vec::new();
+    if let Some(arr) = attrs.get("defenders").and_then(|v| v.as_array()) {
+        for d in arr {
+            if let Some(pos) = d.get("position").and_then(|v| v.as_str()) {
+                defenders.push(DefenderInfo {
+                    position: pos.to_string(),
+                    error: d
+                        .get("error")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                });
+            }
+        }
+    }
+    let spray = if location.is_some() || hr_location.is_some() {
+        Some(SprayEntry {
+            x: location.map(|(x, _)| x),
+            y: location.map(|(_, y)| y),
+            result: attr_str(attrs, "playResult").unwrap_or("").to_string(),
+            bip_type: play_type_str.to_string(),
+            hr_location,
+            defenders,
+        })
+    } else {
+        None
+    };
+
     let is_dropped_third = pr.is_dropped_third_strike();
     let is_away = offense == r.state.away_id;
-    let parity = if is_away { 0 } else { 1 };
+    let parity = usize::from(!is_away);
     let runs_before = team_run_total(&r.runs_by_half, r.hi(), parity);
 
     // Always snapshot so we can categorize any runs scored during this event.
@@ -723,10 +791,13 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         r,
         pr,
         bip_type,
-        &offense,
-        &defense,
-        batter_id.as_deref(),
-        pa_is_qab,
+        BipStatContext {
+            offense: &offense,
+            defense: &defense,
+            batter_id: batter_id.as_deref(),
+            pa_is_qab,
+            spray,
+        },
     );
 
     if pa_is_competitive {
@@ -810,6 +881,7 @@ fn apply_bip_advance(
 // ---------------------------------------------------------------------------
 
 /// Returns true if this play caused a third out.
+#[allow(clippy::too_many_lines)]
 fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let pt = BrPlayType::parse(attr_str(attrs, "playType").unwrap_or(""));
     let base = attr_usize(attrs, "base");
@@ -819,16 +891,16 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let defense = r.defense_team().to_string();
     r.track_hi();
 
-    // Record player baserunning stats
+    // Record player baserunning stats — defer run credit for base=4
+    // to the base-state block below so it stays in sync with score_run.
     if let (Some(ref rid), Some(b)) = (&runner_id, base) {
-        r.players.record_baserunning(rid, pt, b);
         if b == 4 && !pt.is_out() {
-            r.players.record_pitch_run(&defense);
-            // Earned run tracking
-            if !r.state.error_runners.contains(rid) {
-                r.players.record_pitch_earned_run(&defense);
+            // SB/CS stats only — run credit handled below with score_run
+            if pt == BrPlayType::StoleBase {
+                r.players.record_sb(rid);
             }
-            r.state.error_runners.remove(rid);
+        } else {
+            r.players.record_baserunning(rid, pt, b);
         }
     }
 
@@ -841,50 +913,41 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     match pt {
         BrPlayType::WildPitch => {
             r.ll_for_offense().wp += 1;
-            if base == Some(4) && !pt.is_out() {
-                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
-                    r.ll_for_offense().runs_passive += 1;
-                }
+            if base == Some(4) && !pt.is_out() && runner_is_on_bases(r, runner_id.as_deref()) {
+                r.ll_for_offense().runs_passive += 1;
             }
         }
         BrPlayType::PassedBall => {
             r.ll_for_offense().pb += 1;
-            if base == Some(4) && !pt.is_out() {
-                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
-                    r.ll_for_offense().runs_passive += 1;
-                }
+            if base == Some(4) && !pt.is_out() && runner_is_on_bases(r, runner_id.as_deref()) {
+                r.ll_for_offense().runs_passive += 1;
             }
         }
         BrPlayType::CaughtStealing => {
             r.ll_for_offense().cs += 1;
         }
-        BrPlayType::StoleBase => {
-            if base == Some(4) {
-                // Only count if runner is actually on bases (not already auto-scored)
-                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
-                    r.ll_for_offense().steals_of_home += 1;
-                    r.ll_for_offense().runs_passive += 1;
-                }
-            }
+        BrPlayType::StoleBase if base == Some(4) && runner_is_on_bases(r, runner_id.as_deref()) => {
+            // Only count if runner is actually on bases (not already auto-scored)
+            r.ll_for_offense().steals_of_home += 1;
+            r.ll_for_offense().runs_passive += 1;
         }
-        BrPlayType::DefensiveIndifference | BrPlayType::OnSamePitch | BrPlayType::OtherAdvance => {
+        BrPlayType::DefensiveIndifference | BrPlayType::OnSamePitch | BrPlayType::OtherAdvance
+            if base == Some(4) && !pt.is_out() && runner_is_on_bases(r, runner_id.as_deref()) =>
+        {
             // Passive run only if runner is still on bases (not already auto-scored)
-            if base == Some(4) && !pt.is_out() {
-                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
-                    r.ll_for_offense().runs_passive += 1;
-                }
-            }
+            r.ll_for_offense().runs_passive += 1;
         }
-        BrPlayType::AdvancedOnLastPlay | BrPlayType::AdvancedOnError | BrPlayType::OnSameError => {
+        BrPlayType::AdvancedOnLastPlay | BrPlayType::AdvancedOnError | BrPlayType::OnSameError
+            if base == Some(4)
+                && !pt.is_out()
+                && r.pending_bip_snapshot.is_none()
+                && runner_is_on_bases(r, runner_id.as_deref()) =>
+        {
             // BIP run — only count if runner is still on bases (not already
             // auto-scored) AND there's no pending BIP snapshot (which would
             // capture this run via the delta). If there IS a pending snapshot,
             // the delta will handle it when resolve_bip_snapshot runs.
-            if base == Some(4) && !pt.is_out() && r.pending_bip_snapshot.is_none() {
-                if runner_id.as_ref().is_some_and(|rid| r.state.bases.find_by_id(rid).is_some()) {
-                    r.ll_for_offense().runs_on_bip += 1;
-                }
-            }
+            r.ll_for_offense().runs_on_bip += 1;
         }
         _ => {}
     }
@@ -923,6 +986,16 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             } else {
                 if was_auto_scored(&r.state, rid) {
                     undo_auto_scored_run(r, rid);
+                    // The auto-advance may have moved a runner INTO base b
+                    // (e.g., 2B→3B after 3B scored). Push them back so the
+                    // remained runner can reclaim the base.
+                    if r.state.bases.is_occupied(b) && b >= 2 {
+                        let displaced = r.state.bases.get(b).cloned();
+                        r.state.bases.set(b, None);
+                        if let Some(occ) = displaced {
+                            r.state.bases.set(b - 1, Some(occ));
+                        }
+                    }
                 }
                 r.state.bases.set(b, occupant);
             }
@@ -930,8 +1003,14 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             if on_bases {
                 r.state.bases.clear_runner(rid, b);
                 score::score_run(hi, &mut r.runs_by_half);
+                r.players.record_run(rid);
+                r.players.record_pitch_run(&defense);
+                if !r.state.error_runners.contains(rid) {
+                    r.players.record_pitch_earned_run(&defense);
+                }
+                r.state.error_runners.remove(rid);
             }
-            // Not on bases (already auto-scored) -> confirmation, skip
+            // Not on bases: already auto-scored — skip (confirmation only)
         } else if (1..=3).contains(&b) {
             if on_bases {
                 r.state.bases.clear_by_id(rid);
@@ -944,6 +1023,10 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         }
     }
     false
+}
+
+fn runner_is_on_bases(r: &Replay, runner_id: Option<&str>) -> bool {
+    runner_id.is_some_and(|rid| r.state.bases.find_by_id(rid).is_some())
 }
 
 /// Runner didn't move -- update tracking from anonymous to their real ID.
@@ -983,10 +1066,11 @@ fn handle_end_at_bat(r: &mut Replay, attrs: &serde_json::Value) {
         if reason == "hit_by_pitch" {
             r.players.record_hbp(&offense);
             r.players.record_pitch_hbp(&defense);
+        } else {
+            r.players.record_ci(&offense);
         }
-        // Catcher interference: batter reaches base but it's not an HBP.
-        // PA context and base advancement are handled by complete_walk_or_hbp.
-        // No HBP stat credit.
+        // Catcher interference: batter reaches base and gets a PA, but no AB,
+        // HBP, or pitcher HBP credit.
     }
 }
 
@@ -1096,6 +1180,7 @@ fn fill_batting_derived(b: &mut BattingStats) {
         home_runs: b.home_runs,
         bb: b.bb,
         hbp: b.hbp,
+        ci: b.ci,
         k: b.k,
         sac_fly: b.sac_fly,
         sac_bunt: b.sac_bunt,
@@ -1195,6 +1280,7 @@ fn merge_batting(dst: &mut BattingStats, src: &BattingStats) {
     dst.k_swinging += src.k_swinging;
     dst.bb += src.bb;
     dst.hbp += src.hbp;
+    dst.ci += src.ci;
     dst.singles += src.singles;
     dst.doubles += src.doubles;
     dst.triples += src.triples;
@@ -1216,6 +1302,7 @@ fn merge_batting(dst: &mut BattingStats, src: &BattingStats) {
     dst.competitive_ab += src.competitive_ab;
     dst.sb += src.sb;
     dst.cs += src.cs;
+    dst.spray_chart.extend_from_slice(&src.spray_chart);
 }
 
 /// Add raw counts from `src` into `dst` (team-level aggregation).
@@ -1352,6 +1439,7 @@ fn build_dead_time(gaps: &[f64]) -> Vec<f64> {
 ///
 /// Returns an error if the event list is empty, teams are not set,
 /// or any event data fails to parse as JSON.
+#[allow(clippy::too_many_lines)]
 pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
     if resolved.is_empty() {
         return Err(ReplayError::NoEvents);
@@ -1416,7 +1504,9 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                 }
                 "pitch" => {
                     if let Some(ts) = evt.created_at {
-                        if r.first_pitch_ts.is_none() { r.first_pitch_ts = Some(ts); }
+                        if r.first_pitch_ts.is_none() {
+                            r.first_pitch_ts = Some(ts);
+                        }
                         r.last_pitch_ts = Some(ts);
                     }
                     handle_pitch(&mut r, &evt.attributes)
@@ -1430,6 +1520,42 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                 "end_half" => true,
                 "override" => {
                     handle_override(&mut r, &evt.attributes);
+                    false
+                }
+                "squash_lineup_index" => {
+                    if let (Some(tid), Some(idx)) = (
+                        attr_str(&evt.attributes, "teamId"),
+                        attr_usize(&evt.attributes, "index"),
+                    ) {
+                        r.players.handle_squash_lineup(tid, idx);
+                    }
+                    false
+                }
+                "reorder_lineup" => {
+                    if let (Some(tid), Some(from), Some(to)) = (
+                        attr_str(&evt.attributes, "teamId"),
+                        attr_usize(&evt.attributes, "fromIndex"),
+                        attr_usize(&evt.attributes, "toIndex"),
+                    ) {
+                        r.players.handle_reorder_lineup(tid, from, to);
+                    }
+                    false
+                }
+                "sub_players" => {
+                    if let (Some(tid), Some(out_id), Some(in_id)) = (
+                        attr_str(&evt.attributes, "teamId"),
+                        attr_str(&evt.attributes, "outgoingPlayerId"),
+                        attr_str(&evt.attributes, "incomingPlayerId"),
+                    ) {
+                        let apply_br = attr_bool(&evt.attributes, "applyToBaserunners", false);
+                        r.players.handle_sub_players(tid, out_id, in_id, apply_br);
+                        if apply_br {
+                            r.state.bases.substitute_runner(out_id, in_id);
+                            if r.state.error_runners.remove(out_id) {
+                                r.state.error_runners.insert(in_id.to_string());
+                            }
+                        }
+                    }
                     false
                 }
                 _ => false,

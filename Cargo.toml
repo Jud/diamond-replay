@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Stateful baseball game replay engine for scoring event streams"
+repository = "https://github.com/Jud/diamond-replay"
+homepage = "https://github.com/Jud/diamond-replay"
+documentation = "https://docs.rs/diamond-replay"
+readme = "README.md"
+keywords = ["baseball", "replay", "statistics", "gamechanger", "tui"]
+categories = ["command-line-utilities", "parser-implementations"]
 
 [dependencies]
 crossterm = { version = "0.29.0", features = ["event-stream"] }

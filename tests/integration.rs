@@ -74,11 +74,12 @@ macro_rules! game_test {
                 if ps.batting.pa > 0 {
                     assert_eq!(
                         ps.batting.ab + ps.batting.bb + ps.batting.hbp
-                            + ps.batting.sac_fly + ps.batting.sac_bunt,
+                            + ps.batting.ci + ps.batting.sac_fly + ps.batting.sac_bunt,
                         ps.batting.pa,
-                        "{} player {} PA invariant failed: ab({}) + bb({}) + hbp({}) + sf({}) + sac({}) != pa({})",
+                        "{} player {} PA invariant failed: ab({}) + bb({}) + hbp({}) + ci({}) + sf({}) + sac({}) != pa({})",
                         $game_key, ps.player_id,
                         ps.batting.ab, ps.batting.bb, ps.batting.hbp,
+                        ps.batting.ci,
                         ps.batting.sac_fly, ps.batting.sac_bunt, ps.batting.pa
                     );
                 }
@@ -164,6 +165,129 @@ game_test!(
     "mariners_vs_tigers_apr1"
 );
 
+game_test!(
+    test_10u_mariners_brewers_apr12,
+    "10U_Mariners_Brewers_Apr12.json",
+    "10U_Mariners_Brewers_Apr12"
+);
+
+/// Regression: auto-scored runners must not be double-counted when the
+/// confirming base_running event arrives in a later transaction.
+#[test]
+fn test_auto_score_no_double_count() {
+    let json = include_str!("../testdata/10U_Mariners_Brewers_Apr12.json");
+    let result = replay_from_json(json).expect("replay should succeed");
+
+    let away_linescore: i32 = result.linescore_away.iter().sum();
+    let home_linescore: i32 = result.linescore_home.iter().sum();
+    let away_player_runs: i32 = result
+        .player_stats
+        .values()
+        .filter(|p| p.team_id == result.away_id)
+        .map(|p| p.batting.runs)
+        .sum();
+    let home_player_runs: i32 = result
+        .player_stats
+        .values()
+        .filter(|p| p.team_id == result.home_id)
+        .map(|p| p.batting.runs)
+        .sum();
+
+    assert_eq!(
+        away_player_runs, away_linescore,
+        "away player runs ({}) != linescore ({})",
+        away_player_runs, away_linescore
+    );
+    assert_eq!(
+        home_player_runs, home_linescore,
+        "home player runs ({}) != linescore ({})",
+        home_player_runs, home_linescore
+    );
+}
+
+#[test]
+fn test_substituted_error_runner_stays_unearned() {
+    fn raw_event(seq: i64, event_data: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("evt-{seq}"),
+            "stream_id": "test",
+            "sequence_number": seq,
+            "event_data": event_data.to_string(),
+        })
+    }
+
+    let events = vec![
+        raw_event(
+            1,
+            serde_json::json!({
+                "code": "set_teams",
+                "attributes": {"awayId": "away", "homeId": "home"}
+            }),
+        ),
+        raw_event(
+            2,
+            serde_json::json!({
+                "code": "fill_lineup_index",
+                "attributes": {"teamId": "away", "playerId": "p1", "index": 0}
+            }),
+        ),
+        raw_event(
+            3,
+            serde_json::json!({
+                "code": "fill_lineup_index",
+                "attributes": {"teamId": "away", "playerId": "p2", "index": 1}
+            }),
+        ),
+        raw_event(
+            4,
+            serde_json::json!({
+                "code": "fill_position",
+                "attributes": {"teamId": "home", "playerId": "hp", "position": "P"}
+            }),
+        ),
+        raw_event(
+            5,
+            serde_json::json!({
+                "code": "transaction",
+                "events": [
+                    {"code": "pitch", "attributes": {"result": "ball_in_play", "advancesCount": true}},
+                    {"code": "ball_in_play", "attributes": {"playResult": "error", "playType": "ground_ball"}}
+                ]
+            }),
+        ),
+        raw_event(
+            6,
+            serde_json::json!({
+                "code": "sub_players",
+                "attributes": {
+                    "teamId": "away",
+                    "outgoingPlayerId": "p1",
+                    "incomingPlayerId": "pr",
+                    "applyToBaserunners": true
+                }
+            }),
+        ),
+        raw_event(
+            7,
+            serde_json::json!({
+                "code": "transaction",
+                "events": [
+                    {"code": "pitch", "attributes": {"result": "ball_in_play", "advancesCount": true}},
+                    {"code": "ball_in_play", "attributes": {"playResult": "home_run", "playType": "fly_ball"}}
+                ]
+            }),
+        ),
+    ];
+    let json = serde_json::to_string(&events).unwrap();
+
+    let result = replay_from_json(&json).expect("replay should succeed");
+
+    assert_eq!(result.linescore_away.iter().sum::<i32>(), 2);
+    assert_eq!(result.home_pitching.runs_allowed, 2);
+    assert_eq!(result.home_pitching.earned_runs_allowed, 1);
+    assert_eq!(result.player_stats["pr"].batting.runs, 1);
+}
+
 #[test]
 fn test_player_stats_populated() {
     let json = include_str!("../testdata/13U_Braves_Padres.json");
@@ -229,6 +353,7 @@ fn test_player_stats_populated() {
                 ps.batting.ab
                     + ps.batting.bb
                     + ps.batting.hbp
+                    + ps.batting.ci
                     + ps.batting.sac_fly
                     + ps.batting.sac_bunt,
                 ps.batting.pa,
@@ -266,34 +391,54 @@ macro_rules! ll_balance_test {
             let home_ll = &result.home_little_league;
 
             assert_eq!(
-                away_ll.runs_on_bip + away_ll.runs_passive, away_total,
+                away_ll.runs_on_bip + away_ll.runs_passive,
+                away_total,
                 "{} away LL balance: bip({}) + passive({}) = {} != linescore({})",
-                $file, away_ll.runs_on_bip, away_ll.runs_passive,
-                away_ll.runs_on_bip + away_ll.runs_passive, away_total
+                $file,
+                away_ll.runs_on_bip,
+                away_ll.runs_passive,
+                away_ll.runs_on_bip + away_ll.runs_passive,
+                away_total
             );
             assert_eq!(
-                home_ll.runs_on_bip + home_ll.runs_passive, home_total,
+                home_ll.runs_on_bip + home_ll.runs_passive,
+                home_total,
                 "{} home LL balance: bip({}) + passive({}) = {} != linescore({})",
-                $file, home_ll.runs_on_bip, home_ll.runs_passive,
-                home_ll.runs_on_bip + home_ll.runs_passive, home_total
+                $file,
+                home_ll.runs_on_bip,
+                home_ll.runs_passive,
+                home_ll.runs_on_bip + home_ll.runs_passive,
+                home_total
             );
         }
     };
 }
 
-ll_balance_test!(test_ll_balance_mariners_cardinals, "10U_Mariners_Cardinals.json");
+ll_balance_test!(
+    test_ll_balance_mariners_cardinals,
+    "10U_Mariners_Cardinals.json"
+);
 ll_balance_test!(test_ll_balance_mets_brewers, "10U_Mets_Brewers.json");
 ll_balance_test!(test_ll_balance_braves_yankees, "10U_Braves_Yankees.json");
 ll_balance_test!(test_ll_balance_tigers_dodgers, "10U_Tigers_Dodgers.json");
 ll_balance_test!(test_ll_balance_13u_braves_padres, "13U_Braves_Padres.json");
-ll_balance_test!(test_ll_balance_13u_mariners_brewers, "13U_Mariners_Brewers.json");
-ll_balance_test!(test_ll_balance_13u_phillies_cardinals, "13U_Phillies_Cardinals.json");
+ll_balance_test!(
+    test_ll_balance_13u_mariners_brewers,
+    "13U_Mariners_Brewers.json"
+);
+ll_balance_test!(
+    test_ll_balance_13u_phillies_cardinals,
+    "13U_Phillies_Cardinals.json"
+);
 ll_balance_test!(test_ll_balance_mccabe_reds, "McCabe_Tigers_Reds.json");
 ll_balance_test!(test_ll_balance_mccabe_angels, "McCabe_Tigers_Angels.json");
 ll_balance_test!(test_ll_balance_mccabe_yankees, "McCabe_Tigers_Yankees.json");
 ll_balance_test!(test_ll_balance_mccabe_mets, "McCabe_Tigers_Mets.json");
 ll_balance_test!(test_ll_balance_stars_tigers, "stars_vs_tigers_mar31.json");
-ll_balance_test!(test_ll_balance_mariners_tigers_apr1, "mariners_vs_tigers_apr1.json");
+ll_balance_test!(
+    test_ll_balance_mariners_tigers_apr1,
+    "mariners_vs_tigers_apr1.json"
+);
 
 // ---------------------------------------------------------------------------
 // Undo/redo: Stars vs Tigers has 32 undos and 1 redo that restores a
@@ -346,8 +491,12 @@ fn test_no_steal_home_reduces_runs() {
     for ps in simulated.player_stats.values() {
         if ps.batting.pa > 0 {
             assert_eq!(
-                ps.batting.ab + ps.batting.bb + ps.batting.hbp
-                    + ps.batting.sac_fly + ps.batting.sac_bunt,
+                ps.batting.ab
+                    + ps.batting.bb
+                    + ps.batting.hbp
+                    + ps.batting.ci
+                    + ps.batting.sac_fly
+                    + ps.batting.sac_bunt,
                 ps.batting.pa,
                 "Player {} PA invariant failed in simulation",
                 ps.player_id

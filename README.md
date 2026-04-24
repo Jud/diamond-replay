@@ -17,12 +17,18 @@ Four TUI views: Box Score, Batting, Pitching, Little League. Press `?` on any st
 
 `--little-league` adds per-team youth stats: run sourcing, pace, baserunning chaos, free bases.
 
-`--no-steal-home` replays the game with steal-of-home attempts blocked. Runners stay at 3B but auto-score on any subsequent ball in play that doesn't end the inning, plus walks, WP, and PB.
+`--no-steal-home` replays the game with chaos scoring from 3B blocked. Runners stay at 3B but auto-score on any subsequent ball in play that doesn't end the inning, plus forced advances such as walks and HBP.
 
 ## Library
 
 ```rust
-let result = diamond_replay::replay_from_json(&event_json)?;
+use diamond_replay::{replay_from_json, replay_from_json_with_options, ReplayOptions};
+
+let result = replay_from_json(&event_json)?;
+let simulated = replay_from_json_with_options(
+    &event_json,
+    ReplayOptions::no_steal_home(),
+)?;
 
 for (id, player) in &result.player_stats {
     let b = &player.batting;
@@ -30,11 +36,13 @@ for (id, player) in &result.player_stats {
 }
 ```
 
+The supported library surface is exposed from the crate root: replay functions, `ReplayOptions`, `RuleSet`, `RawApiEvent`, `ReplayError`, `GameResult`, and the result stat structs.
+
 ## Stats
 
 ### Batting
 
-PA, AB, H, TB, XBH, AVG, OBP, SLG, OPS, ISO, BABIP, wOBA, K%, BB%, BB/K, GB%, FB%, LD%, HR/FB, RBI, R, SB, CS, SB%, GIDP, QAB%, Competitive AB%, P/PA, Hard Hit%.
+PA, AB, H, TB, XBH, AVG, OBP, SLG, OPS, ISO, BABIP, wOBA, K%, BB%, BB/K, GB%, FB%, LD%, HR/FB, RBI, R, SB, CS, SB%, GIDP, CI, QAB%, Competitive AB%, P/PA, Hard Hit%.
 
 ### Pitching
 
@@ -76,18 +84,18 @@ See `testdata/` for 14 complete game files from real 10U and 13U games.
 cargo test
 ```
 
-68 tests: 39 unit (stat computation, stat help coverage), 29 integration (full-game linescores, LL balance invariants, undo/redo, simulation).
+100 tests: 64 unit (stat computation, stat help coverage, rule compiler, stream traversal, shadow state, lineup mutation handling), 34 integration/artifact tests (full-game linescores, accounting gates, LL balance invariants, undo/redo, simulation), and 2 doctests.
 
 ## Architecture
 
-~5,500 lines of Rust. Dependencies: `serde`, `serde_json`, `thiserror`, `ratatui`, `crossterm`.
+~6,200 lines of Rust, plus fixture-backed integration tests. Dependencies: `serde`, `serde_json`, `thiserror`, `ratatui`, `crossterm`.
 
 ```
 src/
-  lib.rs              public API
+  lib.rs              public API and stable type re-exports
   event.rs            JSON parsing, typed event enums
   undo.rs             stack-based undo/redo resolution
-  filter.rs           EventFilter trait, simulation filters
+  rules/              rule-set event stream compilers
   state.rs            GameState, BaseState, PAContext
   replay.rs           state machine, event loop, LL stats
   compute.rs          pure stat formulas

@@ -35,7 +35,7 @@ pub fn resolve_undos(mut raw_events: Vec<RawApiEvent>) -> Vec<RawApiEvent> {
     stack
 }
 
-/// Extract the top-level "code" field from event_data JSON without full parsing.
+/// Extract the top-level "code" field from `event_data` JSON without full parsing.
 fn extract_code(event_data: &str) -> Option<String> {
     if event_data.contains("\"undo\"") || event_data.contains("\"redo\"") {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(event_data) {
@@ -54,7 +54,7 @@ mod tests {
             id: format!("evt-{seq}"),
             stream_id: "test".into(),
             sequence_number: seq,
-            event_data: format!(r#"{{"code":"{}"}}"#, code),
+            event_data: format!(r#"{{"code":"{code}"}}"#),
         }
     }
 

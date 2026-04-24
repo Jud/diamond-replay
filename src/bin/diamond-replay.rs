@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::io::{self, stdout};
 use std::{env, fs, process};
@@ -17,9 +18,10 @@ use ratatui::widgets::{
 use ratatui::Terminal;
 
 use diamond_replay::stat_help;
-use diamond_replay::player::{BattingStats, PitchingStats, PlayerGameStats};
-use diamond_replay::replay::{GameResult, LittleLeagueStats};
-use diamond_replay::{replay_from_json, replay_from_json_no_steal_home};
+use diamond_replay::{
+    replay_from_json, replay_from_json_with_options, BattingStats, GameResult, LittleLeagueStats,
+    PitchingStats, PlayerGameStats, ReplayOptions,
+};
 
 // ---------------------------------------------------------------------------
 // Style constants
@@ -168,11 +170,15 @@ impl App {
             return;
         }
         self.sort = match self.sort {
-            Some(s) if s.col == self.col_cursor && s.descending => {
-                Some(SortState { col: self.col_cursor, descending: false })
-            }
+            Some(s) if s.col == self.col_cursor && s.descending => Some(SortState {
+                col: self.col_cursor,
+                descending: false,
+            }),
             Some(s) if s.col == self.col_cursor => None,
-            _ => Some(SortState { col: self.col_cursor, descending: true }),
+            _ => Some(SortState {
+                col: self.col_cursor,
+                descending: true,
+            }),
         };
     }
 
@@ -181,13 +187,16 @@ impl App {
         let home_team = truncate_team(&result.home_id, 20);
         match self.view {
             View::BoxScore => {
-                self.boxscore_content = build_boxscore_lines(result, away_team, home_team, self.sort);
+                self.boxscore_content =
+                    build_boxscore_lines(result, away_team, home_team, self.sort);
             }
             View::Batting => {
-                self.batting_content = build_adv_batting_lines(result, away_team, home_team, self.sort);
+                self.batting_content =
+                    build_adv_batting_lines(result, away_team, home_team, self.sort);
             }
             View::Pitching => {
-                self.pitching_content = build_pitching_lines(result, away_team, home_team, self.sort);
+                self.pitching_content =
+                    build_pitching_lines(result, away_team, home_team, self.sort);
             }
             View::LittleLeague => {}
         }
@@ -283,7 +292,7 @@ fn team_batters<'a>(
         .values()
         .filter(|p| p.team_id == team_id && !p.player_id.starts_with("__anon_") && p.batting.pa > 0)
         .collect();
-    players.sort_by(|a, b| b.batting.pa.cmp(&a.batting.pa));
+    players.sort_by_key(|p| Reverse(p.batting.pa));
     players
 }
 
@@ -549,7 +558,9 @@ fn build_boxscore_lines(
     )));
     lines.push(build_batting_header(&cols));
     let mut away = team_batters(&result.player_stats, &result.away_id);
-    sort_players(&mut away, sort, |p| boxscore_sort_val(&p.batting, sort.map_or(0, |s| s.col)));
+    sort_players(&mut away, sort, |p| {
+        boxscore_sort_val(&p.batting, sort.map_or(0, |s| s.col))
+    });
     for p in &away {
         lines.push(build_batting_row(p, &cols));
     }
@@ -567,7 +578,9 @@ fn build_boxscore_lines(
     )));
     lines.push(build_batting_header(&cols));
     let mut home = team_batters(&result.player_stats, &result.home_id);
-    sort_players(&mut home, sort, |p| boxscore_sort_val(&p.batting, sort.map_or(0, |s| s.col)));
+    sort_players(&mut home, sort, |p| {
+        boxscore_sort_val(&p.batting, sort.map_or(0, |s| s.col))
+    });
     for p in &home {
         lines.push(build_batting_row(p, &cols));
     }
@@ -645,7 +658,9 @@ fn build_adv_batting_lines(
     )));
     lines.push(build_adv_batting_header());
     let mut away = team_batters(&result.player_stats, &result.away_id);
-    sort_players(&mut away, sort, |p| batting_sort_val(&p.batting, sort.map_or(0, |s| s.col)));
+    sort_players(&mut away, sort, |p| {
+        batting_sort_val(&p.batting, sort.map_or(0, |s| s.col))
+    });
     for p in &away {
         lines.push(build_adv_batting_row(p));
     }
@@ -658,7 +673,9 @@ fn build_adv_batting_lines(
     )));
     lines.push(build_adv_batting_header());
     let mut home = team_batters(&result.player_stats, &result.home_id);
-    sort_players(&mut home, sort, |p| batting_sort_val(&p.batting, sort.map_or(0, |s| s.col)));
+    sort_players(&mut home, sort, |p| {
+        batting_sort_val(&p.batting, sort.map_or(0, |s| s.col))
+    });
     for p in &home {
         lines.push(build_adv_batting_row(p));
     }
@@ -735,7 +752,9 @@ fn build_pitching_lines(
     lines.push(build_pitching_header());
     let mut away = team_pitchers(&result.player_stats, &result.away_id);
     sort_players(&mut away, sort, |p| {
-        p.pitching.as_ref().map_or(-1.0, |ps| pitching_sort_val(ps, sort.map_or(0, |s| s.col)))
+        p.pitching
+            .as_ref()
+            .map_or(-1.0, |ps| pitching_sort_val(ps, sort.map_or(0, |s| s.col)))
     });
     for p in &away {
         lines.push(build_pitching_row(p));
@@ -750,7 +769,9 @@ fn build_pitching_lines(
     lines.push(build_pitching_header());
     let mut home = team_pitchers(&result.player_stats, &result.home_id);
     sort_players(&mut home, sort, |p| {
-        p.pitching.as_ref().map_or(-1.0, |ps| pitching_sort_val(ps, sort.map_or(0, |s| s.col)))
+        p.pitching
+            .as_ref()
+            .map_or(-1.0, |ps| pitching_sort_val(ps, sort.map_or(0, |s| s.col)))
     });
     for p in &home {
         lines.push(build_pitching_row(p));
@@ -781,19 +802,22 @@ fn build_ll_team_lines(ll: &LittleLeagueStats, team_name: &str) -> Vec<Line<'sta
     lines.push(Line::from(""));
 
     // Runs Breakdown
-    lines.push(Line::from(Span::styled(
-        " Runs Breakdown",
-        HEADER_STYLE,
-    )));
+    lines.push(Line::from(Span::styled(" Runs Breakdown", HEADER_STYLE)));
     let total_runs = ll.runs_on_bip + ll.runs_passive;
     let bip_run_pct = if total_runs > 0 {
-        format!("{:.1}%", f64::from(ll.runs_on_bip) / f64::from(total_runs) * 100.0)
+        format!(
+            "{:.1}%",
+            f64::from(ll.runs_on_bip) / f64::from(total_runs) * 100.0
+        )
     } else {
         "-".to_string()
     };
     lines.push(ll_row("Runs on BIP", &ll.runs_on_bip.to_string()));
     lines.push(Line::from(vec![
-        Span::styled(format!("   {:<28}", "Passive Runs"), Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("   {:<28}", "Passive Runs"),
+            Style::default().fg(Color::Gray),
+        ),
         Span::styled(format!("{:>6}", ll.runs_passive), Style::default()),
         Span::styled("    (BB/HBP/WP/PB)", Style::default().fg(Color::DarkGray)),
     ]));
@@ -821,10 +845,7 @@ fn build_ll_team_lines(ll: &LittleLeagueStats, team_name: &str) -> Vec<Line<'sta
     lines.push(Line::from(""));
 
     // Baserunning Chaos
-    lines.push(Line::from(Span::styled(
-        " Baserunning Chaos",
-        HEADER_STYLE,
-    )));
+    lines.push(Line::from(Span::styled(" Baserunning Chaos", HEADER_STYLE)));
     lines.push(ll_row("Wild Pitches", &ll.wp.to_string()));
     lines.push(ll_row("Passed Balls", &ll.pb.to_string()));
     lines.push(ll_row("Caught Stealing", &ll.cs.to_string()));
@@ -834,11 +855,7 @@ fn build_ll_team_lines(ll: &LittleLeagueStats, team_name: &str) -> Vec<Line<'sta
     lines
 }
 
-fn build_ll_lines(
-    result: &GameResult,
-    away_team: &str,
-    home_team: &str,
-) -> Vec<Line<'static>> {
+fn build_ll_lines(result: &GameResult, away_team: &str, home_team: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.extend(build_ll_team_lines(&result.away_little_league, away_team));
     lines.extend(build_ll_team_lines(&result.home_little_league, home_team));
@@ -850,7 +867,12 @@ fn build_ll_lines(
 // ---------------------------------------------------------------------------
 
 fn draw_header(frame: &mut ratatui::Frame, area: Rect, current_view: View, game_name: &str) {
-    let views = [View::BoxScore, View::Batting, View::Pitching, View::LittleLeague];
+    let views = [
+        View::BoxScore,
+        View::Batting,
+        View::Pitching,
+        View::LittleLeague,
+    ];
     let tab_spans: Vec<Span> = views
         .iter()
         .enumerate()
@@ -905,13 +927,17 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     // Apply alternating row colors and column highlight at draw time
     let mut lines = content_lines.clone();
     let cols = app.view.stat_columns();
-    let highlight_span = if cols.is_empty() { None } else { Some(app.col_cursor + 1) };
+    let highlight_span = if cols.is_empty() {
+        None
+    } else {
+        Some(app.col_cursor + 1)
+    };
     let zebra_bg = Style::default().bg(Color::Indexed(236));
     let mut data_row: usize = 0;
 
     for line in &mut lines {
-        let is_header = line.spans.len() > 1
-            && line.spans.first().is_some_and(|s| s.style == HEADER_STYLE);
+        let is_header =
+            line.spans.len() > 1 && line.spans.first().is_some_and(|s| s.style == HEADER_STYLE);
         let is_data = line.spans.len() > 1 && !is_header;
 
         // Highlight selected column in header rows + sort indicator
@@ -1027,12 +1053,24 @@ fn draw_help_overlay(frame: &mut ratatui::Frame, help: &stat_help::StatHelp, scr
     lines.push(Line::from(""));
 
     if !help.formula.is_empty() {
-        let bold_white = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let bold_white = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
         section(&mut lines, "Formula", help.formula, bold_white);
     }
 
-    section(&mut lines, "MLB Benchmarks", help.mlb_benchmark, Style::default());
-    section(&mut lines, "Youth Context", help.youth_context, Style::default());
+    section(
+        &mut lines,
+        "MLB Benchmarks",
+        help.mlb_benchmark,
+        Style::default(),
+    );
+    section(
+        &mut lines,
+        "Youth Context",
+        help.youth_context,
+        Style::default(),
+    );
     section(&mut lines, "Caveats", help.caveats, Style::default());
 
     lines.push(Line::from(Span::styled(
@@ -1114,10 +1152,8 @@ fn run_tui(result: &GameResult, game_name: String) -> io::Result<()> {
                 },
                 _ => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('?') => {
-                        if !app.view.stat_columns().is_empty() {
-                            app.show_help = true;
-                        }
+                    KeyCode::Char('?') if !app.view.stat_columns().is_empty() => {
+                        app.show_help = true;
                     }
                     KeyCode::Enter => {
                         app.toggle_sort();
@@ -1150,19 +1186,29 @@ fn run_tui(result: &GameResult, game_name: String) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn pct1(num: i32, den: i32) -> f64 {
-    if den == 0 { 0.0 } else { (f64::from(num) / f64::from(den) * 100.0 * 10.0).round() / 10.0 }
+    if den == 0 {
+        0.0
+    } else {
+        (f64::from(num) / f64::from(den) * 100.0 * 10.0).round() / 10.0
+    }
 }
 
 fn ratio1(num: i32, den: i32) -> f64 {
-    if den == 0 { 0.0 } else { (f64::from(num) / f64::from(den) * 10.0).round() / 10.0 }
+    if den == 0 {
+        0.0
+    } else {
+        (f64::from(num) / f64::from(den) * 10.0).round() / 10.0
+    }
 }
 
 fn median_i32(v: &[i32]) -> f64 {
-    if v.is_empty() { return 0.0; }
+    if v.is_empty() {
+        return 0.0;
+    }
     let mut sorted = v.to_vec();
     sorted.sort_unstable();
     let mid = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         f64::from(sorted[mid - 1] + sorted[mid]) / 2.0
     } else {
         f64::from(sorted[mid])
@@ -1171,12 +1217,15 @@ fn median_i32(v: &[i32]) -> f64 {
 
 /// Compute per-inning rate using outs recorded (handles partial innings).
 fn per_inn(num: i32, outs: i32) -> f64 {
-    if outs == 0 { return 0.0; }
+    if outs == 0 {
+        return 0.0;
+    }
     let ip = f64::from(outs) / 3.0;
     (f64::from(num) / ip * 10.0).round() / 10.0
 }
 
 /// Build the flat per-team stats object matching the stats-2026.html schema.
+#[allow(clippy::too_many_arguments)]
 fn build_ll_team_json(
     bat: &BattingStats,
     own_pitch: &PitchingStats,
@@ -1187,7 +1236,7 @@ fn build_ll_team_json(
     innings_bat: i32,
     innings_field: i32,
 ) -> serde_json::Value {
-    use serde_json::{Map, Value, Number};
+    use serde_json::{Map, Number, Value};
 
     let runs_total = bat.runs;
     let bip = opp_pitch.bip;
@@ -1233,16 +1282,28 @@ fn build_ll_team_json(
     m.insert("BB_pct".into(), f(pct1(bat.bb, bat.pa)));
     m.insert("BIP_pct".into(), f(pct1(bip, bat.pa)));
     m.insert("HBP_pct".into(), f(pct1(bat.hbp, bat.pa)));
-    m.insert("pitches_per_PA".into(), f(ratio1(opp_pitch.pitches, bat.pa)));
-    m.insert("median_pitches_between_bip".into(), f(median_i32(&ll.pitches_between_bip)));
+    m.insert(
+        "pitches_per_PA".into(),
+        f(ratio1(opp_pitch.pitches, bat.pa)),
+    );
+    m.insert(
+        "median_pitches_between_bip".into(),
+        f(median_i32(&ll.pitches_between_bip)),
+    );
     m.insert("pitches_per_BIP".into(), f(ratio1(opp_pitch.pitches, bip)));
     m.insert("K_per_inn".into(), f(per_inn(bat.k, outs_bat)));
     m.insert("BB_per_inn".into(), f(per_inn(bat.bb, outs_bat)));
     m.insert("BIP_per_inn".into(), f(per_inn(bip, outs_bat)));
     m.insert("runs_total".into(), i(runs_total));
-    m.insert("runs_on_bip_pct".into(), f(pct1(ll.runs_on_bip, runs_total)));
+    m.insert(
+        "runs_on_bip_pct".into(),
+        f(pct1(ll.runs_on_bip, runs_total)),
+    );
     m.insert("free_bases".into(), i(free_bases));
-    m.insert("free_bases_per_inn".into(), f(per_inn(free_bases, outs_bat)));
+    m.insert(
+        "free_bases_per_inn".into(),
+        f(per_inn(free_bases, outs_bat)),
+    );
 
     // Pitching side
     m.insert("pitch_pitches".into(), i(own_pitch.pitches));
@@ -1251,20 +1312,44 @@ fn build_ll_team_json(
     m.insert("pitch_strikes_look".into(), i(own_pitch.strikes_looking));
     m.insert("pitch_fouls".into(), i(own_pitch.fouls));
     m.insert("pitch_bip".into(), i(own_pitch.bip));
-    m.insert("pitch_ball_pct".into(), f(pct1(own_pitch.balls, own_pitch.pitches)));
-    m.insert("pitch_strike_pct".into(), f(pct1(own_pitch.pitches - own_pitch.balls, own_pitch.pitches)));
+    m.insert(
+        "pitch_ball_pct".into(),
+        f(pct1(own_pitch.balls, own_pitch.pitches)),
+    );
+    m.insert(
+        "pitch_strike_pct".into(),
+        f(pct1(own_pitch.pitches - own_pitch.balls, own_pitch.pitches)),
+    );
     m.insert("pitch_K".into(), i(own_pitch.k));
     m.insert("pitch_BB".into(), i(own_pitch.bb));
-    m.insert("pitch_K_per_inn".into(), f(per_inn(own_pitch.k, outs_field)));
-    m.insert("pitch_BB_per_inn".into(), f(per_inn(own_pitch.bb, outs_field)));
-    m.insert("pitch_BIP_per_inn".into(), f(per_inn(own_pitch.bip, outs_field)));
-    m.insert("pitch_pitches_per_BIP".into(), f(ratio1(own_pitch.pitches, own_pitch.bip)));
-    m.insert("pitch_median_p_between_bip".into(), f(median_i32(&ll.pitches_between_bip_pitching)));
+    m.insert(
+        "pitch_K_per_inn".into(),
+        f(per_inn(own_pitch.k, outs_field)),
+    );
+    m.insert(
+        "pitch_BB_per_inn".into(),
+        f(per_inn(own_pitch.bb, outs_field)),
+    );
+    m.insert(
+        "pitch_BIP_per_inn".into(),
+        f(per_inn(own_pitch.bip, outs_field)),
+    );
+    m.insert(
+        "pitch_pitches_per_BIP".into(),
+        f(ratio1(own_pitch.pitches, own_pitch.bip)),
+    );
+    m.insert(
+        "pitch_median_p_between_bip".into(),
+        f(median_i32(&ll.pitches_between_bip_pitching)),
+    );
 
     // Defense side
     m.insert("def_sb".into(), i(opp_bat.sb));
     m.insert("def_free_bases".into(), i(def_free));
-    m.insert("def_free_bases_per_inn".into(), f(per_inn(def_free, outs_field)));
+    m.insert(
+        "def_free_bases_per_inn".into(),
+        f(per_inn(def_free, outs_field)),
+    );
 
     Value::Object(m)
 }
@@ -1303,24 +1388,31 @@ fn dump_json(result: &GameResult, game_name: &str, include_ll: bool) {
         } else {
             (durations.iter().sum::<f64>() / durations.len() as f64 * 10.0).round() / 10.0
         };
-        obj.insert("inning_durations_min".into(), serde_json::json!(
-            durations.iter().map(|d| (d * 10.0).round() / 10.0).collect::<Vec<_>>()
-        ));
+        obj.insert(
+            "inning_durations_min".into(),
+            serde_json::json!(durations
+                .iter()
+                .map(|d| (d * 10.0).round() / 10.0)
+                .collect::<Vec<_>>()),
+        );
         obj.insert("avg_inning_min".into(), serde_json::json!(avg_inning_min));
-        obj.insert("teams".to_string(), serde_json::json!({
-            result.away_id.clone(): build_ll_team_json(
-                &result.away_batting, &result.away_pitching, &result.home_pitching,
-                &result.home_batting, &result.home_little_league,
-                &result.away_little_league,
-                away_inn_bat, home_inn_bat,
-            ),
-            result.home_id.clone(): build_ll_team_json(
-                &result.home_batting, &result.home_pitching, &result.away_pitching,
-                &result.away_batting, &result.away_little_league,
-                &result.home_little_league,
-                home_inn_bat, away_inn_bat,
-            ),
-        }));
+        obj.insert(
+            "teams".to_string(),
+            serde_json::json!({
+                result.away_id.clone(): build_ll_team_json(
+                    &result.away_batting, &result.away_pitching, &result.home_pitching,
+                    &result.home_batting, &result.home_little_league,
+                    &result.away_little_league,
+                    away_inn_bat, home_inn_bat,
+                ),
+                result.home_id.clone(): build_ll_team_json(
+                    &result.home_batting, &result.home_pitching, &result.away_pitching,
+                    &result.away_batting, &result.away_little_league,
+                    &result.home_little_league,
+                    home_inn_bat, away_inn_bat,
+                ),
+            }),
+        );
     }
     println!(
         "{}",
@@ -1348,8 +1440,12 @@ fn main() {
     let (data, game_name) = if is_stdin {
         // Reading from stdin — only works with --json (TUI needs a terminal)
         if !json_mode {
-            eprintln!("Usage: diamond-replay <game.json> [--json] [--little-league] [--no-steal-home]");
-            eprintln!("       cat game.json | diamond-replay --json [--little-league] [--no-steal-home]");
+            eprintln!(
+                "Usage: diamond-replay <game.json> [--json] [--little-league] [--no-steal-home]"
+            );
+            eprintln!(
+                "       cat game.json | diamond-replay --json [--little-league] [--no-steal-home]"
+            );
             process::exit(1);
         }
         let mut buf = String::new();
@@ -1373,7 +1469,7 @@ fn main() {
     };
 
     let result = if no_steal_home {
-        replay_from_json_no_steal_home(&data)
+        replay_from_json_with_options(&data, ReplayOptions::no_steal_home())
     } else {
         replay_from_json(&data)
     };

@@ -43,9 +43,9 @@ impl BaseState {
     ///
     /// Panics if `base` is not in the range 1..=3.
     #[must_use]
-    pub fn get(&self, base: usize) -> &Option<BaseOccupant> {
+    pub fn get(&self, base: usize) -> Option<&BaseOccupant> {
         assert!((1..=3).contains(&base), "base must be 1-3");
-        &self.bases[base - 1]
+        self.bases[base - 1].as_ref()
     }
 
     /// # Panics
@@ -71,7 +71,7 @@ impl BaseState {
     ///
     /// Panics if `from` or `to` is not in the range 1..=3.
     pub fn advance(&mut self, from: usize, to: usize) {
-        let occ = self.get(from).clone();
+        let occ = self.get(from).cloned();
         self.set(from, None);
         self.set(to, occ);
     }
@@ -142,6 +142,17 @@ impl BaseState {
             return true;
         }
         self.clear_fallback(dest_base)
+    }
+
+    /// Replace one runner with another on the bases (player substitution).
+    pub fn substitute_runner(&mut self, old_id: &str, new_id: &str) {
+        for occ in &mut self.bases {
+            if let Some(BaseOccupant::Player(pid)) = occ {
+                if pid == old_id {
+                    *pid = new_id.to_string();
+                }
+            }
+        }
     }
 }
 

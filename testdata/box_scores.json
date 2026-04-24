@@ -191,5 +191,11 @@
     "home": [0, 0, 3, 3],
     "awayTotal": 8,
     "homeTotal": 6
+  },
+  "10U_Mariners_Brewers_Apr12": {
+    "away": [0, 3, 5, 2, 5],
+    "home": [5, 2, 3, 0, 4],
+    "awayTotal": 15,
+    "homeTotal": 14
   }
 }
