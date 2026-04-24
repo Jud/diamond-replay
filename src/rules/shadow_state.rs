@@ -255,3 +255,95 @@ impl ShadowState {
         self.advance_batter();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set_teams() -> Value {
+        serde_json::json!({"awayId": "away", "homeId": "home"})
+    }
+
+    fn fill_lineup(team_id: &str, player_id: &str, index: usize) -> Value {
+        serde_json::json!({
+            "teamId": team_id,
+            "playerId": player_id,
+            "index": index
+        })
+    }
+
+    fn pitch(result: &str) -> Value {
+        serde_json::json!({"result": result, "advancesCount": true})
+    }
+
+    fn ball_in_play(play_result: &str) -> Value {
+        serde_json::json!({"playResult": play_result})
+    }
+
+    fn state_with_away_lineup() -> ShadowState {
+        let mut state = ShadowState::new();
+        state.observe_set_teams(&set_teams());
+        state.observe_fill_lineup_index(&fill_lineup("away", "batter-1", 0));
+        state.observe_fill_lineup_index(&fill_lineup("away", "batter-2", 1));
+        state
+    }
+
+    #[test]
+    fn walk_forces_runner_and_rotates_lineup() {
+        let mut state = state_with_away_lineup();
+        state.advance_runner("runner-1", 1);
+        state.advance_runner("runner-2", 2);
+        state.advance_runner("runner-3", 3);
+
+        for _ in 0..4 {
+            state.observe_pitch(&pitch("ball"));
+        }
+
+        assert_eq!(state.bases[0].as_deref(), Some("batter-1"));
+        assert_eq!(state.bases[1].as_deref(), Some("runner-1"));
+        assert_eq!(state.bases[2].as_deref(), Some("runner-2"));
+        assert_eq!(state.current_batter().as_deref(), Some("batter-2"));
+    }
+
+    #[test]
+    fn single_advances_runners_and_batter() {
+        let mut state = state_with_away_lineup();
+        state.advance_runner("runner-1", 1);
+        state.advance_runner("runner-2", 2);
+
+        state.observe_ball_in_play(&ball_in_play("single"));
+
+        assert_eq!(state.bases[0].as_deref(), Some("batter-1"));
+        assert_eq!(state.bases[1].as_deref(), Some("runner-1"));
+        assert_eq!(state.bases[2].as_deref(), Some("runner-2"));
+        assert_eq!(state.current_batter().as_deref(), Some("batter-2"));
+    }
+
+    #[test]
+    fn strikeout_marks_switch_after_third_out() {
+        let mut state = state_with_away_lineup();
+        state.outs = 2;
+
+        for _ in 0..3 {
+            state.observe_pitch(&pitch("strike_swinging"));
+        }
+
+        assert!(state.need_switch);
+        assert!(state.finish_raw_event());
+        assert_eq!(state.outs, 0);
+        assert_eq!(state.offense, "home");
+    }
+
+    #[test]
+    fn runner_out_removes_runner_and_can_end_half() {
+        let mut state = state_with_away_lineup();
+        state.outs = 2;
+        state.advance_runner("runner-1", 2);
+
+        state.record_runner_out(Some("runner-1"));
+
+        assert!(!state.is_occupied(2));
+        assert!(state.finish_raw_event());
+        assert_eq!(state.offense, "home");
+    }
+}

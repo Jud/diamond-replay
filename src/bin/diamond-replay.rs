@@ -18,8 +18,8 @@ use ratatui::Terminal;
 
 use diamond_replay::stat_help;
 use diamond_replay::{
-    replay_from_json, replay_from_json_no_steal_home, BattingStats, GameResult, LittleLeagueStats,
-    PitchingStats, PlayerGameStats,
+    replay_from_json, replay_from_json_with_options, BattingStats, GameResult, LittleLeagueStats,
+    PitchingStats, PlayerGameStats, ReplayOptions,
 };
 
 // ---------------------------------------------------------------------------
@@ -1470,7 +1470,7 @@ fn main() {
     };
 
     let result = if no_steal_home {
-        replay_from_json_no_steal_home(&data)
+        replay_from_json_with_options(&data, ReplayOptions::no_steal_home())
     } else {
         replay_from_json(&data)
     };

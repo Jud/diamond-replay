@@ -1,3 +1,38 @@
+//! Replay engine for `GameChanger` scoring event streams.
+//!
+//! The crate exposes a small, stable API from the crate root. Use
+//! [`replay_from_json`] for standard ground-truth replay, or
+//! [`replay_from_json_with_options`] with [`ReplayOptions`] for simulations.
+//!
+//! ```no_run
+//! # fn main() -> diamond_replay::Result<()> {
+//! let event_json = "[]";
+//! let result = diamond_replay::replay_from_json(event_json)?;
+//! println!(
+//!     "{}-{}",
+//!     result.linescore_away.iter().sum::<i32>(),
+//!     result.linescore_home.iter().sum::<i32>()
+//! );
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ```no_run
+//! # fn main() -> diamond_replay::Result<()> {
+//! let event_json = "[]";
+//! let simulated = diamond_replay::replay_from_json_with_options(
+//!     event_json,
+//!     diamond_replay::ReplayOptions::no_steal_home(),
+//! )?;
+//! println!(
+//!     "steals of home suppressed: {}",
+//!     simulated.away_little_league.steals_of_home
+//!         + simulated.home_little_league.steals_of_home
+//! );
+//! # Ok(())
+//! # }
+//! ```
+//!
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
