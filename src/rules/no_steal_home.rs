@@ -5,6 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde_json::Value;
+
 use super::stream::{self, EventStreamRule};
 use crate::error::Result;
 use crate::event::{attr_bool, attr_str, attr_usize, BrPlayType, PlayResult, RawApiEvent};
@@ -157,6 +159,162 @@ impl NoStealHomeState {
         }
         self.advance_batter();
     }
+
+    fn handle_set_teams(&mut self, attrs: &Value) {
+        if let (Some(away), Some(home)) = (attr_str(attrs, "awayId"), attr_str(attrs, "homeId")) {
+            self.away_id = away.to_string();
+            self.home_id = home.to_string();
+            self.offense = away.to_string();
+        }
+    }
+
+    fn handle_fill_lineup_index(&mut self, attrs: &Value) {
+        if let (Some(tid), Some(pid), Some(idx)) = (
+            attr_str(attrs, "teamId"),
+            attr_str(attrs, "playerId"),
+            attr_usize(attrs, "index"),
+        ) {
+            self.lineup.insert((tid.to_string(), idx), pid.to_string());
+            let size = self.lineup_size.entry(tid.to_string()).or_insert(0);
+            if idx + 1 > *size {
+                *size = idx + 1;
+            }
+        }
+    }
+
+    fn handle_fill_lineup(&mut self, attrs: &Value) {
+        if let (Some(tid), Some(pid)) = (attr_str(attrs, "teamId"), attr_str(attrs, "playerId")) {
+            let next_idx = self.lineup_size.get(tid).copied().unwrap_or(0);
+            self.lineup
+                .insert((tid.to_string(), next_idx), pid.to_string());
+            *self.lineup_size.entry(tid.to_string()).or_insert(0) = next_idx + 1;
+        }
+    }
+
+    fn handle_goto_lineup_index(&mut self, attrs: &Value) {
+        if let (Some(tid), Some(idx)) = (attr_str(attrs, "teamId"), attr_usize(attrs, "index")) {
+            self.current_index.insert(tid.to_string(), idx);
+        }
+    }
+
+    fn handle_pitch(&mut self, attrs: &Value) {
+        if !attr_bool(attrs, "advancesCount", true) {
+            return;
+        }
+
+        let result = attr_str(attrs, "result").unwrap_or("");
+        match result {
+            "ball" => {
+                self.balls += 1;
+                if self.balls >= 4 {
+                    self.apply_walk();
+                    self.reset_count();
+                }
+            }
+            "strike_swinging" | "strike_looking" => {
+                self.strikes += 1;
+                if self.strikes >= 3 {
+                    self.outs += 1;
+                    self.reset_count();
+                    self.advance_batter();
+                    if self.outs >= 3 {
+                        self.need_switch = true;
+                    }
+                }
+            }
+            "foul" => {
+                if self.strikes < 2 {
+                    self.strikes += 1;
+                }
+            }
+            "hit_by_pitch" => {
+                self.apply_walk();
+                self.reset_count();
+            }
+            "ball_in_play" => {
+                self.reset_count();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_ball_in_play(&mut self, attrs: &Value) {
+        let pr = attr_str(attrs, "playResult").unwrap_or("");
+        if PlayResult::parse(pr).is_batter_out() {
+            let added = if pr == "double_play" { 2 } else { 1 };
+            self.outs += added;
+            self.advance_batter();
+            if self.outs >= 3 {
+                self.need_switch = true;
+            }
+        } else {
+            self.apply_hit(pr);
+        }
+    }
+
+    fn handle_base_running(&mut self, attrs: &Value) -> bool {
+        let pt = attr_str(attrs, "playType").unwrap_or("");
+        let br_type = BrPlayType::parse(pt);
+        let base = attr_usize(attrs, "base");
+        let runner_id = attr_str(attrs, "runnerId").map(str::to_string);
+
+        if br_type.is_chaos() {
+            return self.handle_chaos_base_running(base, runner_id.as_deref());
+        }
+
+        if runner_id
+            .as_ref()
+            .is_some_and(|rid| self.diverged.contains(rid) && !br_type.is_out())
+        {
+            return false;
+        }
+
+        if br_type.is_out() {
+            if let Some(rid) = &runner_id {
+                self.remove_runner(rid);
+                self.diverged.remove(rid);
+            }
+            self.outs += 1;
+            if self.outs >= 3 {
+                self.need_switch = true;
+            }
+            return true;
+        }
+
+        if let (Some(rid), Some(b)) = (&runner_id, base) {
+            self.remove_runner(rid);
+            if (1..=3).contains(&b) {
+                self.set(b, Some(rid.clone()));
+            }
+        }
+        true
+    }
+
+    fn handle_chaos_base_running(&mut self, base: Option<usize>, runner_id: Option<&str>) -> bool {
+        let blocked = match base {
+            Some(4) => true,
+            Some(b @ 1..=3) => self.is_occupied(b),
+            _ => false,
+        };
+
+        if blocked {
+            if let Some(rid) = runner_id {
+                self.diverged.insert(rid.to_string());
+            }
+            return false;
+        }
+
+        if let (Some(rid), Some(b)) = (runner_id, base) {
+            self.remove_runner(rid);
+            self.set(b, Some(rid.to_string()));
+        }
+        true
+    }
+
+    fn handle_end_half(&mut self) {
+        self.switch_half();
+        self.need_switch = false;
+    }
 }
 
 /// Compile the no-steal-home scenario. Chaos base-running events are
@@ -172,171 +330,41 @@ pub(super) fn compile(resolved: Vec<RawApiEvent>) -> Result<Vec<RawApiEvent>> {
 }
 
 impl EventStreamRule for NoStealHomeState {
-    #[allow(clippy::too_many_lines)]
-    fn apply_sub_event(&mut self, sub: serde_json::Value) -> Result<Option<serde_json::Value>> {
+    fn apply_sub_event(&mut self, sub: Value) -> Result<Option<Value>> {
         let code = attr_str(&sub, "code").unwrap_or("");
-        let null = serde_json::Value::Null;
+        let null = Value::Null;
         let attrs = sub.get("attributes").unwrap_or(&null);
 
         let keep = match code {
             "set_teams" => {
-                if let (Some(away), Some(home)) =
-                    (attr_str(attrs, "awayId"), attr_str(attrs, "homeId"))
-                {
-                    self.away_id = away.to_string();
-                    self.home_id = home.to_string();
-                    self.offense = away.to_string();
-                }
+                self.handle_set_teams(attrs);
                 true
             }
-
             "fill_lineup_index" => {
-                if let (Some(tid), Some(pid), Some(idx)) = (
-                    attr_str(attrs, "teamId"),
-                    attr_str(attrs, "playerId"),
-                    attr_usize(attrs, "index"),
-                ) {
-                    self.lineup.insert((tid.to_string(), idx), pid.to_string());
-                    let size = self.lineup_size.entry(tid.to_string()).or_insert(0);
-                    if idx + 1 > *size {
-                        *size = idx + 1;
-                    }
-                }
+                self.handle_fill_lineup_index(attrs);
                 true
             }
-
             "fill_lineup" => {
-                if let (Some(tid), Some(pid)) =
-                    (attr_str(attrs, "teamId"), attr_str(attrs, "playerId"))
-                {
-                    let next_idx = self.lineup_size.get(tid).copied().unwrap_or(0);
-                    self.lineup
-                        .insert((tid.to_string(), next_idx), pid.to_string());
-                    *self.lineup_size.entry(tid.to_string()).or_insert(0) = next_idx + 1;
-                }
+                self.handle_fill_lineup(attrs);
                 true
             }
-
             "goto_lineup_index" => {
-                if let (Some(tid), Some(idx)) =
-                    (attr_str(attrs, "teamId"), attr_usize(attrs, "index"))
-                {
-                    self.current_index.insert(tid.to_string(), idx);
-                }
+                self.handle_goto_lineup_index(attrs);
                 true
             }
-
             "pitch" => {
-                if attr_bool(attrs, "advancesCount", true) {
-                    let result = attr_str(attrs, "result").unwrap_or("");
-                    match result {
-                        "ball" => {
-                            self.balls += 1;
-                            if self.balls >= 4 {
-                                self.apply_walk();
-                                self.reset_count();
-                            }
-                        }
-                        "strike_swinging" | "strike_looking" => {
-                            self.strikes += 1;
-                            if self.strikes >= 3 {
-                                self.outs += 1;
-                                self.reset_count();
-                                self.advance_batter();
-                                if self.outs >= 3 {
-                                    self.need_switch = true;
-                                }
-                            }
-                        }
-                        "foul" => {
-                            if self.strikes < 2 {
-                                self.strikes += 1;
-                            }
-                        }
-                        "hit_by_pitch" => {
-                            self.apply_walk();
-                            self.reset_count();
-                        }
-                        "ball_in_play" => {
-                            self.reset_count();
-                        }
-                        _ => {}
-                    }
-                }
+                self.handle_pitch(attrs);
                 true
             }
-
             "ball_in_play" => {
-                let pr = attr_str(attrs, "playResult").unwrap_or("");
-                if PlayResult::parse(pr).is_batter_out() {
-                    let added = if pr == "double_play" { 2 } else { 1 };
-                    self.outs += added;
-                    self.advance_batter();
-                    if self.outs >= 3 {
-                        self.need_switch = true;
-                    }
-                } else {
-                    self.apply_hit(pr);
-                }
+                self.handle_ball_in_play(attrs);
                 true
             }
-
-            "base_running" => {
-                let pt = attr_str(attrs, "playType").unwrap_or("");
-                let br_type = BrPlayType::parse(pt);
-                let base = attr_usize(attrs, "base");
-                let runner_id = attr_str(attrs, "runnerId").map(str::to_string);
-
-                if br_type.is_chaos() {
-                    let blocked = match base {
-                        Some(4) => true,
-                        Some(b @ 1..=3) => self.is_occupied(b),
-                        _ => false,
-                    };
-                    if blocked {
-                        if let Some(rid) = &runner_id {
-                            self.diverged.insert(rid.clone());
-                        }
-                        false
-                    } else {
-                        if let (Some(rid), Some(b)) = (&runner_id, base) {
-                            self.remove_runner(rid);
-                            self.set(b, Some(rid.clone()));
-                        }
-                        true
-                    }
-                } else if runner_id
-                    .as_ref()
-                    .is_some_and(|rid| self.diverged.contains(rid) && !br_type.is_out())
-                {
-                    false
-                } else if br_type.is_out() {
-                    if let Some(rid) = &runner_id {
-                        self.remove_runner(rid);
-                        self.diverged.remove(rid);
-                    }
-                    self.outs += 1;
-                    if self.outs >= 3 {
-                        self.need_switch = true;
-                    }
-                    true
-                } else {
-                    if let (Some(rid), Some(b)) = (&runner_id, base) {
-                        self.remove_runner(rid);
-                        if (1..=3).contains(&b) {
-                            self.set(b, Some(rid.clone()));
-                        }
-                    }
-                    true
-                }
-            }
-
+            "base_running" => self.handle_base_running(attrs),
             "end_half" => {
-                self.switch_half();
-                self.need_switch = false;
+                self.handle_end_half();
                 true
             }
-
             _ => true,
         };
 
