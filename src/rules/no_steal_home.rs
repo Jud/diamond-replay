@@ -3,13 +3,14 @@
 //! Transforms an undo-resolved event stream before feeding it to the
 //! core replay engine. The core engine stays pure with zero rule hooks.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde_json::Value;
 
+use super::shadow_state::ShadowState;
 use super::stream::{self, EventStreamRule};
 use crate::error::Result;
-use crate::event::{attr_bool, attr_str, attr_usize, BrPlayType, PlayResult, RawApiEvent};
+use crate::event::{attr_str, attr_usize, BrPlayType, RawApiEvent};
 
 /// Lightweight base/out tracker for the scenario compiler.
 ///
@@ -29,227 +30,40 @@ use crate::event::{attr_bool, attr_str, attr_usize, BrPlayType, PlayResult, RawA
 /// blocked) are dropped so they don't undo the rule's auto-advance.
 /// ```
 struct NoStealHomeState {
-    bases: [Option<String>; 3], // 0=1B, 1=2B, 2=3B
-    outs: i32,
-    balls: i32,
-    strikes: i32,
-    need_switch: bool,
+    shadow: ShadowState,
     diverged: HashSet<String>,
-    // Lineup tracking for batter ID resolution
-    away_id: String,
-    home_id: String,
-    offense: String,
-    lineup: HashMap<(String, usize), String>, // (team, slot) → player ID
-    lineup_size: HashMap<String, usize>,
-    current_index: HashMap<String, usize>,
 }
 
 impl NoStealHomeState {
     fn new() -> Self {
         Self {
-            bases: [None, None, None],
-            outs: 0,
-            balls: 0,
-            strikes: 0,
-            need_switch: false,
+            shadow: ShadowState::new(),
             diverged: HashSet::new(),
-            away_id: String::new(),
-            home_id: String::new(),
-            offense: String::new(),
-            lineup: HashMap::new(),
-            lineup_size: HashMap::new(),
-            current_index: HashMap::new(),
         }
-    }
-
-    fn current_batter(&self) -> Option<String> {
-        let idx = self.current_index.get(&self.offense).copied().unwrap_or(0);
-        self.lineup.get(&(self.offense.clone(), idx)).cloned()
-    }
-
-    fn advance_batter(&mut self) {
-        let size = self
-            .lineup_size
-            .get(&self.offense)
-            .copied()
-            .unwrap_or(1)
-            .max(1);
-        let idx = self.current_index.entry(self.offense.clone()).or_insert(0);
-        *idx = (*idx + 1) % size;
-    }
-
-    fn is_occupied(&self, base: usize) -> bool {
-        (1..=3).contains(&base) && self.bases[base - 1].is_some()
-    }
-
-    fn set(&mut self, base: usize, id: Option<String>) {
-        if (1..=3).contains(&base) {
-            self.bases[base - 1] = id;
-        }
-    }
-
-    fn remove_runner(&mut self, rid: &str) {
-        for b in 0..3 {
-            if self.bases[b].as_deref() == Some(rid) {
-                self.bases[b] = None;
-                break;
-            }
-        }
-    }
-
-    fn switch_half(&mut self) {
-        self.bases = [None, None, None];
-        self.outs = 0;
-        self.balls = 0;
-        self.strikes = 0;
-        self.diverged.clear();
-        self.offense = if self.offense == self.away_id {
-            self.home_id.clone()
-        } else {
-            self.away_id.clone()
-        };
-    }
-
-    fn reset_count(&mut self) {
-        self.balls = 0;
-        self.strikes = 0;
-    }
-
-    /// Walk/HBP force-advance: push runners up, place batter on 1B.
-    fn apply_walk(&mut self) {
-        let batter = self.current_batter();
-        if self.is_occupied(1) && self.is_occupied(2) && self.is_occupied(3) {
-            self.set(3, None); // runner scores
-        }
-        if self.is_occupied(1) && self.is_occupied(2) {
-            let r2 = self.bases[1].take();
-            self.set(3, r2);
-        }
-        if self.is_occupied(1) {
-            let r1 = self.bases[0].take();
-            self.set(2, r1);
-        }
-        self.set(1, batter);
-        self.advance_batter();
-    }
-
-    /// Auto-advance for hits. Places batter on the appropriate base.
-    fn apply_hit(&mut self, play_result: &str) {
-        let batter = self.current_batter();
-        match play_result {
-            "single" => {
-                self.set(3, None); // 3B scores
-                let r2 = self.bases[1].take();
-                self.set(3, r2); // 2B→3B
-                let r1 = self.bases[0].take();
-                self.set(2, r1); // 1B→2B
-                self.set(1, batter);
-            }
-            "double" => {
-                self.set(3, None); // 3B scores
-                self.set(2, None); // 2B scores
-                let r1 = self.bases[0].take();
-                self.set(3, r1); // 1B→3B
-                self.set(2, batter);
-            }
-            "triple" | "home_run" => {
-                self.bases = [None, None, None];
-            }
-            _ => {} // corrections follow via base_running
-        }
-        self.advance_batter();
     }
 
     fn handle_set_teams(&mut self, attrs: &Value) {
-        if let (Some(away), Some(home)) = (attr_str(attrs, "awayId"), attr_str(attrs, "homeId")) {
-            self.away_id = away.to_string();
-            self.home_id = home.to_string();
-            self.offense = away.to_string();
-        }
+        self.shadow.observe_set_teams(attrs);
     }
 
     fn handle_fill_lineup_index(&mut self, attrs: &Value) {
-        if let (Some(tid), Some(pid), Some(idx)) = (
-            attr_str(attrs, "teamId"),
-            attr_str(attrs, "playerId"),
-            attr_usize(attrs, "index"),
-        ) {
-            self.lineup.insert((tid.to_string(), idx), pid.to_string());
-            let size = self.lineup_size.entry(tid.to_string()).or_insert(0);
-            if idx + 1 > *size {
-                *size = idx + 1;
-            }
-        }
+        self.shadow.observe_fill_lineup_index(attrs);
     }
 
     fn handle_fill_lineup(&mut self, attrs: &Value) {
-        if let (Some(tid), Some(pid)) = (attr_str(attrs, "teamId"), attr_str(attrs, "playerId")) {
-            let next_idx = self.lineup_size.get(tid).copied().unwrap_or(0);
-            self.lineup
-                .insert((tid.to_string(), next_idx), pid.to_string());
-            *self.lineup_size.entry(tid.to_string()).or_insert(0) = next_idx + 1;
-        }
+        self.shadow.observe_fill_lineup(attrs);
     }
 
     fn handle_goto_lineup_index(&mut self, attrs: &Value) {
-        if let (Some(tid), Some(idx)) = (attr_str(attrs, "teamId"), attr_usize(attrs, "index")) {
-            self.current_index.insert(tid.to_string(), idx);
-        }
+        self.shadow.observe_goto_lineup_index(attrs);
     }
 
     fn handle_pitch(&mut self, attrs: &Value) {
-        if !attr_bool(attrs, "advancesCount", true) {
-            return;
-        }
-
-        let result = attr_str(attrs, "result").unwrap_or("");
-        match result {
-            "ball" => {
-                self.balls += 1;
-                if self.balls >= 4 {
-                    self.apply_walk();
-                    self.reset_count();
-                }
-            }
-            "strike_swinging" | "strike_looking" => {
-                self.strikes += 1;
-                if self.strikes >= 3 {
-                    self.outs += 1;
-                    self.reset_count();
-                    self.advance_batter();
-                    if self.outs >= 3 {
-                        self.need_switch = true;
-                    }
-                }
-            }
-            "foul" => {
-                if self.strikes < 2 {
-                    self.strikes += 1;
-                }
-            }
-            "hit_by_pitch" => {
-                self.apply_walk();
-                self.reset_count();
-            }
-            "ball_in_play" => {
-                self.reset_count();
-            }
-            _ => {}
-        }
+        self.shadow.observe_pitch(attrs);
     }
 
     fn handle_ball_in_play(&mut self, attrs: &Value) {
-        let pr = attr_str(attrs, "playResult").unwrap_or("");
-        if PlayResult::parse(pr).is_batter_out() {
-            let added = if pr == "double_play" { 2 } else { 1 };
-            self.outs += added;
-            self.advance_batter();
-            if self.outs >= 3 {
-                self.need_switch = true;
-            }
-        } else {
-            self.apply_hit(pr);
-        }
+        self.shadow.observe_ball_in_play(attrs);
     }
 
     fn handle_base_running(&mut self, attrs: &Value) -> bool {
@@ -271,21 +85,14 @@ impl NoStealHomeState {
 
         if br_type.is_out() {
             if let Some(rid) = &runner_id {
-                self.remove_runner(rid);
                 self.diverged.remove(rid);
             }
-            self.outs += 1;
-            if self.outs >= 3 {
-                self.need_switch = true;
-            }
+            self.shadow.record_runner_out(runner_id.as_deref());
             return true;
         }
 
         if let (Some(rid), Some(b)) = (&runner_id, base) {
-            self.remove_runner(rid);
-            if (1..=3).contains(&b) {
-                self.set(b, Some(rid.clone()));
-            }
+            self.shadow.advance_runner(rid, b);
         }
         true
     }
@@ -293,7 +100,7 @@ impl NoStealHomeState {
     fn handle_chaos_base_running(&mut self, base: Option<usize>, runner_id: Option<&str>) -> bool {
         let blocked = match base {
             Some(4) => true,
-            Some(b @ 1..=3) => self.is_occupied(b),
+            Some(b @ 1..=3) => self.shadow.is_occupied(b),
             _ => false,
         };
 
@@ -305,15 +112,14 @@ impl NoStealHomeState {
         }
 
         if let (Some(rid), Some(b)) = (runner_id, base) {
-            self.remove_runner(rid);
-            self.set(b, Some(rid.to_string()));
+            self.shadow.advance_runner(rid, b);
         }
         true
     }
 
     fn handle_end_half(&mut self) {
-        self.switch_half();
-        self.need_switch = false;
+        self.shadow.switch_half();
+        self.diverged.clear();
     }
 }
 
@@ -372,9 +178,8 @@ impl EventStreamRule for NoStealHomeState {
     }
 
     fn finish_raw_event(&mut self) -> Result<()> {
-        if self.need_switch {
-            self.switch_half();
-            self.need_switch = false;
+        if self.shadow.finish_raw_event() {
+            self.diverged.clear();
         }
         Ok(())
     }

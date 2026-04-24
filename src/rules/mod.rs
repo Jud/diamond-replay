@@ -4,6 +4,7 @@
 //! replay engine sees it. Standard replay is an identity compiler.
 
 mod no_steal_home;
+mod shadow_state;
 mod standard;
 mod stream;
 
