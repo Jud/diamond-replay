@@ -285,13 +285,15 @@ impl PlayerTracker {
         }
         let new_size = size - 1;
         self.lineup_size.insert(team_id.to_string(), new_size);
-        // Adjust current batting index: if it pointed at or past the removed
-        // slot, shift it so the next batter stays correct.
         if let Some(idx) = self.current_index.get_mut(team_id) {
-            if *idx >= new_size && new_size > 0 {
+            if new_size == 0 {
+                *idx = 0;
+            } else if *idx >= size {
                 *idx %= new_size;
-            } else if *idx > removed_index && *idx > 0 {
+            } else if *idx > removed_index {
                 *idx -= 1;
+            } else if *idx >= new_size {
+                *idx = 0;
             }
         }
     }
@@ -757,5 +759,36 @@ impl PlayerTracker {
 impl Default for PlayerTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlayerTracker;
+
+    #[test]
+    fn squash_lineup_keeps_shifted_last_batter_due() {
+        let mut players = PlayerTracker::new();
+        for index in 0..5 {
+            players.handle_fill_lineup("away", &format!("batter-{index}"), index);
+        }
+        players.handle_goto("away", 4);
+
+        players.handle_squash_lineup("away", 2);
+
+        assert_eq!(players.current_batter("away"), Some("batter-4"));
+    }
+
+    #[test]
+    fn squash_lineup_wraps_when_due_batter_is_removed_last_slot() {
+        let mut players = PlayerTracker::new();
+        for index in 0..3 {
+            players.handle_fill_lineup("away", &format!("batter-{index}"), index);
+        }
+        players.handle_goto("away", 2);
+
+        players.handle_squash_lineup("away", 2);
+
+        assert_eq!(players.current_batter("away"), Some("batter-0"));
     }
 }

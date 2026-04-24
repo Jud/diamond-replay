@@ -241,10 +241,14 @@ impl ShadowState {
         let new_size = size - 1;
         self.lineup_size.insert(team.clone(), new_size);
         if let Some(current_index) = self.current_index.get_mut(team_id) {
-            if *current_index >= new_size && new_size > 0 {
+            if new_size == 0 {
+                *current_index = 0;
+            } else if *current_index >= size {
                 *current_index %= new_size;
             } else if *current_index > removed_index {
                 *current_index -= 1;
+            } else if *current_index >= new_size {
+                *current_index = 0;
             }
         }
     }
@@ -488,6 +492,20 @@ mod tests {
 
         assert_eq!(state.lineup_size["away"], 2);
         assert_eq!(state.current_batter().as_deref(), Some("batter-3"));
+    }
+
+    #[test]
+    fn squash_lineup_keeps_shifted_last_batter_due() {
+        let mut state = state_with_away_lineup();
+        state.observe_fill_lineup_index(&fill_lineup("away", "batter-3", 2));
+        state.observe_fill_lineup_index(&fill_lineup("away", "batter-4", 3));
+        state.observe_fill_lineup_index(&fill_lineup("away", "batter-5", 4));
+        state.observe_goto_lineup_index(&serde_json::json!({"teamId": "away", "index": 4}));
+
+        state.observe_squash_lineup_index(&squash_lineup(2));
+
+        assert_eq!(state.lineup_size["away"], 4);
+        assert_eq!(state.current_batter().as_deref(), Some("batter-5"));
     }
 
     #[test]
