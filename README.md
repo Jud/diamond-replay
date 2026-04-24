@@ -84,7 +84,7 @@ See `testdata/` for 14 complete game files from real 10U and 13U games.
 cargo test
 ```
 
-90 tests: 57 unit (stat computation, stat help coverage, rule compiler, stream traversal, shadow state), 33 integration/artifact tests (full-game linescores, accounting gates, LL balance invariants, undo/redo, simulation).
+97 tests: 61 unit (stat computation, stat help coverage, rule compiler, stream traversal, shadow state), 34 integration/artifact tests (full-game linescores, accounting gates, LL balance invariants, undo/redo, simulation), and 2 doctests.
 
 ## Architecture
 

@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::shadow_state::ShadowState;
 use super::stream::{self, EventStreamRule};
 use crate::error::Result;
-use crate::event::{attr_str, attr_usize, BrPlayType, RawApiEvent};
+use crate::event::{attr_bool, attr_str, attr_usize, BrPlayType, RawApiEvent};
 
 /// Lightweight base/out tracker for the scenario compiler.
 ///
@@ -56,6 +56,26 @@ impl NoStealHomeState {
 
     fn handle_goto_lineup_index(&mut self, attrs: &Value) {
         self.shadow.observe_goto_lineup_index(attrs);
+    }
+
+    fn handle_squash_lineup_index(&mut self, attrs: &Value) {
+        self.shadow.observe_squash_lineup_index(attrs);
+    }
+
+    fn handle_reorder_lineup(&mut self, attrs: &Value) {
+        self.shadow.observe_reorder_lineup(attrs);
+    }
+
+    fn handle_sub_players(&mut self, attrs: &Value) {
+        if let (Some(outgoing_id), Some(incoming_id)) = (
+            attr_str(attrs, "outgoingPlayerId"),
+            attr_str(attrs, "incomingPlayerId"),
+        ) {
+            if attr_bool(attrs, "applyToBaserunners", false) && self.diverged.remove(outgoing_id) {
+                self.diverged.insert(incoming_id.to_string());
+            }
+        }
+        self.shadow.observe_sub_players(attrs);
     }
 
     fn handle_pitch(&mut self, attrs: &Value) {
@@ -158,6 +178,18 @@ impl EventStreamRule for NoStealHomeState {
                 self.handle_goto_lineup_index(attrs);
                 true
             }
+            "squash_lineup_index" => {
+                self.handle_squash_lineup_index(attrs);
+                true
+            }
+            "reorder_lineup" => {
+                self.handle_reorder_lineup(attrs);
+                true
+            }
+            "sub_players" => {
+                self.handle_sub_players(attrs);
+                true
+            }
             "pitch" => {
                 self.handle_pitch(attrs);
                 true
@@ -220,6 +252,18 @@ mod tests {
 
     fn base_running(play_type: &str, base: u64, runner_id: &str) -> serde_json::Value {
         serde_json::json!({"code": "base_running", "attributes": {"playType": play_type, "base": base, "runnerId": runner_id}})
+    }
+
+    fn sub_players(outgoing_id: &str, incoming_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "code": "sub_players",
+            "attributes": {
+                "teamId": "away",
+                "outgoingPlayerId": outgoing_id,
+                "incomingPlayerId": incoming_id,
+                "applyToBaserunners": true
+            }
+        })
     }
 
     fn end_half() -> serde_json::Value {
@@ -303,6 +347,20 @@ mod tests {
         ];
         let result = compile(events).unwrap();
         assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn substituted_baserunner_updates_shadow_occupancy() {
+        let events = vec![
+            raw_single(1, base_running("advanced_on_last_play", 3, "old")),
+            raw_single(2, sub_players("old", "new")),
+            raw_single(3, base_running("advanced_on_last_play", 2, "new")),
+            raw_single(4, base_running("passed_ball", 3, "other")),
+        ];
+
+        let result = compile(events).unwrap();
+
+        assert_eq!(result.len(), 4, "PB to newly empty 3B should be allowed");
     }
 
     #[test]

@@ -206,6 +206,89 @@ fn test_auto_score_no_double_count() {
 }
 
 #[test]
+fn test_substituted_error_runner_stays_unearned() {
+    fn raw_event(seq: i64, event_data: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("evt-{seq}"),
+            "stream_id": "test",
+            "sequence_number": seq,
+            "event_data": event_data.to_string(),
+        })
+    }
+
+    let events = vec![
+        raw_event(
+            1,
+            serde_json::json!({
+                "code": "set_teams",
+                "attributes": {"awayId": "away", "homeId": "home"}
+            }),
+        ),
+        raw_event(
+            2,
+            serde_json::json!({
+                "code": "fill_lineup_index",
+                "attributes": {"teamId": "away", "playerId": "p1", "index": 0}
+            }),
+        ),
+        raw_event(
+            3,
+            serde_json::json!({
+                "code": "fill_lineup_index",
+                "attributes": {"teamId": "away", "playerId": "p2", "index": 1}
+            }),
+        ),
+        raw_event(
+            4,
+            serde_json::json!({
+                "code": "fill_position",
+                "attributes": {"teamId": "home", "playerId": "hp", "position": "P"}
+            }),
+        ),
+        raw_event(
+            5,
+            serde_json::json!({
+                "code": "transaction",
+                "events": [
+                    {"code": "pitch", "attributes": {"result": "ball_in_play", "advancesCount": true}},
+                    {"code": "ball_in_play", "attributes": {"playResult": "error", "playType": "ground_ball"}}
+                ]
+            }),
+        ),
+        raw_event(
+            6,
+            serde_json::json!({
+                "code": "sub_players",
+                "attributes": {
+                    "teamId": "away",
+                    "outgoingPlayerId": "p1",
+                    "incomingPlayerId": "pr",
+                    "applyToBaserunners": true
+                }
+            }),
+        ),
+        raw_event(
+            7,
+            serde_json::json!({
+                "code": "transaction",
+                "events": [
+                    {"code": "pitch", "attributes": {"result": "ball_in_play", "advancesCount": true}},
+                    {"code": "ball_in_play", "attributes": {"playResult": "home_run", "playType": "fly_ball"}}
+                ]
+            }),
+        ),
+    ];
+    let json = serde_json::to_string(&events).unwrap();
+
+    let result = replay_from_json(&json).expect("replay should succeed");
+
+    assert_eq!(result.linescore_away.iter().sum::<i32>(), 2);
+    assert_eq!(result.home_pitching.runs_allowed, 2);
+    assert_eq!(result.home_pitching.earned_runs_allowed, 1);
+    assert_eq!(result.player_stats["pr"].batting.runs, 1);
+}
+
+#[test]
 fn test_player_stats_populated() {
     let json = include_str!("../testdata/13U_Braves_Padres.json");
     let result = replay_from_json(json).expect("replay should succeed");

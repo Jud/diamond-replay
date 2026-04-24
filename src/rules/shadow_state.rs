@@ -107,6 +107,37 @@ impl ShadowState {
         }
     }
 
+    pub(super) fn observe_squash_lineup_index(&mut self, attrs: &Value) {
+        if let (Some(team_id), Some(index)) =
+            (attr_str(attrs, "teamId"), attr_usize(attrs, "index"))
+        {
+            self.squash_lineup_index(team_id, index);
+        }
+    }
+
+    pub(super) fn observe_reorder_lineup(&mut self, attrs: &Value) {
+        if let (Some(team_id), Some(from_index), Some(to_index)) = (
+            attr_str(attrs, "teamId"),
+            attr_usize(attrs, "fromIndex"),
+            attr_usize(attrs, "toIndex"),
+        ) {
+            self.reorder_lineup(team_id, from_index, to_index);
+        }
+    }
+
+    pub(super) fn observe_sub_players(&mut self, attrs: &Value) {
+        if let (Some(team_id), Some(outgoing_id), Some(incoming_id)) = (
+            attr_str(attrs, "teamId"),
+            attr_str(attrs, "outgoingPlayerId"),
+            attr_str(attrs, "incomingPlayerId"),
+        ) {
+            self.substitute_lineup_player(team_id, outgoing_id, incoming_id);
+            if attr_bool(attrs, "applyToBaserunners", false) {
+                self.substitute_runner(outgoing_id, incoming_id);
+            }
+        }
+    }
+
     pub(super) fn observe_pitch(&mut self, attrs: &Value) {
         if !attr_bool(attrs, "advancesCount", true) {
             return;
@@ -191,6 +222,73 @@ impl ShadowState {
             .max(1);
         let index = self.current_index.entry(self.offense.clone()).or_insert(0);
         *index = (*index + 1) % size;
+    }
+
+    fn squash_lineup_index(&mut self, team_id: &str, removed_index: usize) {
+        let size = self.lineup_size.get(team_id).copied().unwrap_or(0);
+        if removed_index >= size {
+            return;
+        }
+
+        let team = team_id.to_string();
+        self.lineup.remove(&(team.clone(), removed_index));
+        for index in (removed_index + 1)..size {
+            if let Some(player_id) = self.lineup.remove(&(team.clone(), index)) {
+                self.lineup.insert((team.clone(), index - 1), player_id);
+            }
+        }
+
+        let new_size = size - 1;
+        self.lineup_size.insert(team.clone(), new_size);
+        if let Some(current_index) = self.current_index.get_mut(team_id) {
+            if *current_index >= new_size && new_size > 0 {
+                *current_index %= new_size;
+            } else if *current_index > removed_index {
+                *current_index -= 1;
+            }
+        }
+    }
+
+    fn reorder_lineup(&mut self, team_id: &str, from_index: usize, to_index: usize) {
+        if from_index == to_index {
+            return;
+        }
+
+        let team = team_id.to_string();
+        let moving = self.lineup.remove(&(team.clone(), from_index));
+        if from_index < to_index {
+            for index in from_index..to_index {
+                if let Some(player_id) = self.lineup.remove(&(team.clone(), index + 1)) {
+                    self.lineup.insert((team.clone(), index), player_id);
+                }
+            }
+        } else {
+            for index in (to_index..from_index).rev() {
+                if let Some(player_id) = self.lineup.remove(&(team.clone(), index)) {
+                    self.lineup.insert((team.clone(), index + 1), player_id);
+                }
+            }
+        }
+
+        if let Some(player_id) = moving {
+            self.lineup.insert((team, to_index), player_id);
+        }
+    }
+
+    fn substitute_lineup_player(&mut self, team_id: &str, outgoing_id: &str, incoming_id: &str) {
+        for ((lineup_team, _), player_id) in &mut self.lineup {
+            if lineup_team == team_id && player_id == outgoing_id {
+                *player_id = incoming_id.to_string();
+            }
+        }
+    }
+
+    fn substitute_runner(&mut self, outgoing_id: &str, incoming_id: &str) {
+        for runner in &mut self.bases {
+            if runner.as_deref() == Some(outgoing_id) {
+                *runner = Some(incoming_id.to_string());
+            }
+        }
     }
 
     fn set(&mut self, base: usize, player_id: Option<String>) {
@@ -278,6 +376,30 @@ mod tests {
         serde_json::json!({"playResult": play_result})
     }
 
+    fn reorder_lineup(from_index: usize, to_index: usize) -> Value {
+        serde_json::json!({
+            "teamId": "away",
+            "fromIndex": from_index,
+            "toIndex": to_index
+        })
+    }
+
+    fn squash_lineup(index: usize) -> Value {
+        serde_json::json!({
+            "teamId": "away",
+            "index": index
+        })
+    }
+
+    fn sub_players(outgoing_id: &str, incoming_id: &str, apply_to_baserunners: bool) -> Value {
+        serde_json::json!({
+            "teamId": "away",
+            "outgoingPlayerId": outgoing_id,
+            "incomingPlayerId": incoming_id,
+            "applyToBaserunners": apply_to_baserunners
+        })
+    }
+
     fn state_with_away_lineup() -> ShadowState {
         let mut state = ShadowState::new();
         state.observe_set_teams(&set_teams());
@@ -343,5 +465,39 @@ mod tests {
         assert!(!state.is_occupied(2));
         assert!(state.finish_raw_event());
         assert_eq!(state.offense, "home");
+    }
+
+    #[test]
+    fn reorder_lineup_changes_current_batter() {
+        let mut state = state_with_away_lineup();
+
+        state.observe_reorder_lineup(&reorder_lineup(1, 0));
+        state.observe_ball_in_play(&ball_in_play("single"));
+
+        assert_eq!(state.bases[0].as_deref(), Some("batter-2"));
+        assert_eq!(state.current_batter().as_deref(), Some("batter-1"));
+    }
+
+    #[test]
+    fn squash_lineup_compacts_order() {
+        let mut state = state_with_away_lineup();
+        state.observe_fill_lineup_index(&fill_lineup("away", "batter-3", 2));
+        state.observe_goto_lineup_index(&serde_json::json!({"teamId": "away", "index": 1}));
+
+        state.observe_squash_lineup_index(&squash_lineup(1));
+
+        assert_eq!(state.lineup_size["away"], 2);
+        assert_eq!(state.current_batter().as_deref(), Some("batter-3"));
+    }
+
+    #[test]
+    fn sub_players_replaces_lineup_and_baserunner() {
+        let mut state = state_with_away_lineup();
+        state.advance_runner("batter-1", 2);
+
+        state.observe_sub_players(&sub_players("batter-1", "pinch-runner", true));
+
+        assert_eq!(state.current_batter().as_deref(), Some("pinch-runner"));
+        assert_eq!(state.bases[1].as_deref(), Some("pinch-runner"));
     }
 }

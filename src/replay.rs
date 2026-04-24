@@ -1551,6 +1551,9 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                         r.players.handle_sub_players(tid, out_id, in_id, apply_br);
                         if apply_br {
                             r.state.bases.substitute_runner(out_id, in_id);
+                            if r.state.error_runners.remove(out_id) {
+                                r.state.error_runners.insert(in_id.to_string());
+                            }
                         }
                     }
                     false
