@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::io::{self, stdout};
 use std::{env, fs, process};
@@ -291,7 +292,7 @@ fn team_batters<'a>(
         .values()
         .filter(|p| p.team_id == team_id && !p.player_id.starts_with("__anon_") && p.batting.pa > 0)
         .collect();
-    players.sort_by(|a, b| b.batting.pa.cmp(&a.batting.pa));
+    players.sort_by_key(|p| Reverse(p.batting.pa));
     players
 }
 
@@ -1151,10 +1152,8 @@ fn run_tui(result: &GameResult, game_name: String) -> io::Result<()> {
                 },
                 _ => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('?') => {
-                        if !app.view.stat_columns().is_empty() {
-                            app.show_help = true;
-                        }
+                    KeyCode::Char('?') if !app.view.stat_columns().is_empty() => {
+                        app.show_help = true;
                     }
                     KeyCode::Enter => {
                         app.toggle_sort();

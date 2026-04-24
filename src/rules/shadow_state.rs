@@ -130,10 +130,8 @@ impl ShadowState {
                     self.mark_switch_if_inning_over();
                 }
             }
-            "foul" => {
-                if self.strikes < 2 {
-                    self.strikes += 1;
-                }
+            "foul" if self.strikes < 2 => {
+                self.strikes += 1;
             }
             "hit_by_pitch" => {
                 self.apply_walk();

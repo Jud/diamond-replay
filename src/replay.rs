@@ -926,33 +926,28 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         BrPlayType::CaughtStealing => {
             r.ll_for_offense().cs += 1;
         }
-        BrPlayType::StoleBase => {
-            if base == Some(4) {
-                // Only count if runner is actually on bases (not already auto-scored)
-                if runner_is_on_bases(r, runner_id.as_deref()) {
-                    r.ll_for_offense().steals_of_home += 1;
-                    r.ll_for_offense().runs_passive += 1;
-                }
-            }
+        BrPlayType::StoleBase if base == Some(4) && runner_is_on_bases(r, runner_id.as_deref()) => {
+            // Only count if runner is actually on bases (not already auto-scored)
+            r.ll_for_offense().steals_of_home += 1;
+            r.ll_for_offense().runs_passive += 1;
         }
-        BrPlayType::DefensiveIndifference | BrPlayType::OnSamePitch | BrPlayType::OtherAdvance => {
+        BrPlayType::DefensiveIndifference | BrPlayType::OnSamePitch | BrPlayType::OtherAdvance
+            if base == Some(4) && !pt.is_out() && runner_is_on_bases(r, runner_id.as_deref()) =>
+        {
             // Passive run only if runner is still on bases (not already auto-scored)
-            if base == Some(4) && !pt.is_out() && runner_is_on_bases(r, runner_id.as_deref()) {
-                r.ll_for_offense().runs_passive += 1;
-            }
+            r.ll_for_offense().runs_passive += 1;
         }
-        BrPlayType::AdvancedOnLastPlay | BrPlayType::AdvancedOnError | BrPlayType::OnSameError => {
+        BrPlayType::AdvancedOnLastPlay | BrPlayType::AdvancedOnError | BrPlayType::OnSameError
+            if base == Some(4)
+                && !pt.is_out()
+                && r.pending_bip_snapshot.is_none()
+                && runner_is_on_bases(r, runner_id.as_deref()) =>
+        {
             // BIP run — only count if runner is still on bases (not already
             // auto-scored) AND there's no pending BIP snapshot (which would
             // capture this run via the delta). If there IS a pending snapshot,
             // the delta will handle it when resolve_bip_snapshot runs.
-            if base == Some(4)
-                && !pt.is_out()
-                && r.pending_bip_snapshot.is_none()
-                && runner_is_on_bases(r, runner_id.as_deref())
-            {
-                r.ll_for_offense().runs_on_bip += 1;
-            }
+            r.ll_for_offense().runs_on_bip += 1;
         }
         _ => {}
     }
