@@ -73,7 +73,8 @@ pub struct RawStats {
 | `strikes_looking` | `pitch` result = `strike_looking` |
 | `fouls` | `pitch` result = `foul` |
 | `bip` | `pitch` result = `ball_in_play` |
-| `hbp` | `pitch` result = `hit_by_pitch`, or `end_at_bat` reason = `hit_by_pitch` or `catcher_interference` |
+| `hbp` | `pitch` result = `hit_by_pitch`, or `end_at_bat` reason = `hit_by_pitch` |
+| `ci` | `end_at_bat` reason = `catcher_interference` |
 | `k` | Strike count reaches 3 (via strikes), or dropped third strike |
 | `k_looking` | K where last strike was `strike_looking` |
 | `k_swinging` | K where last strike was `strike_swinging` |
@@ -115,6 +116,7 @@ pub struct BattingStats {
     pub k_swinging: i32,   // strikeouts swinging
     pub bb: i32,           // walks
     pub hbp: i32,          // hit by pitch
+    pub ci: i32,           // catcher interference
     pub singles: i32,      // singles
     pub doubles: i32,      // doubles
     pub triples: i32,      // triples
@@ -130,12 +132,13 @@ pub struct BattingStats {
 
 | Field | Recorded by | Trigger |
 |-------|------------|---------|
-| `pa` | `record_k`, `record_bb`, `record_hbp`, `record_bip`, `record_dropped_k` | Every completed PA |
+| `pa` | `record_k`, `record_bb`, `record_hbp`, `record_ci`, `record_bip`, `record_dropped_k` | Every completed PA |
 | `k` | `record_k`, `record_dropped_k` | Strikeout (3 strikes or dropped third) |
 | `k_looking` | `record_k`, `record_dropped_k` | K where `looking=true` (last strike was called) |
 | `k_swinging` | `record_k`, `record_dropped_k` | K where `looking=false` |
 | `bb` | `record_bb` | Ball 4 |
-| `hbp` | `record_hbp` | Hit by pitch or catcher interference |
+| `hbp` | `record_hbp` | Hit by pitch |
+| `ci` | `record_ci` | Catcher interference |
 | `singles` | `record_bip` | `PlayResult::Single` |
 | `doubles` | `record_bip` | `PlayResult::Double` |
 | `triples` | `record_bip` | `PlayResult::Triple` |

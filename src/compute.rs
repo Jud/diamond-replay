@@ -93,6 +93,7 @@ pub struct BattingRaw {
     pub home_runs: i32,
     pub bb: i32,
     pub hbp: i32,
+    pub ci: i32,
     pub k: i32,
     pub sac_fly: i32,
     pub sac_bunt: i32,
@@ -139,7 +140,7 @@ pub struct BattingDerived {
 #[must_use]
 pub fn compute_batting(raw: &BattingRaw, weights: &WobaWeights) -> BattingDerived {
     let hits = raw.singles + raw.doubles + raw.triples + raw.home_runs;
-    let ab = raw.pa - raw.bb - raw.hbp - raw.sac_fly - raw.sac_bunt;
+    let ab = raw.pa - raw.bb - raw.hbp - raw.sac_fly - raw.sac_bunt - raw.ci;
     let tb = raw.singles + 2 * raw.doubles + 3 * raw.triples + 4 * raw.home_runs;
     let xbh = raw.doubles + raw.triples + raw.home_runs;
 
@@ -440,6 +441,7 @@ mod tests {
             home_runs: 1,
             bb: 2,
             hbp: 1,
+            ci: 0,
             k: 3,
             sac_fly: 1,
             sac_bunt: 0,
@@ -560,6 +562,7 @@ mod tests {
             home_runs: 0,
             bb: 0,
             hbp: 0,
+            ci: 0,
             k: 0,
             sac_fly: 0,
             sac_bunt: 0,
@@ -614,6 +617,7 @@ mod tests {
             home_runs: 0,
             bb: 0,
             hbp: 0,
+            ci: 0,
             k: 4,
             sac_fly: 0,
             sac_bunt: 0,

@@ -19,7 +19,7 @@ pub struct RawApiEvent {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum EventData {
-    Transaction { code: String, events: Vec<SubEvent> },
+    Transaction { events: Vec<SubEvent> },
     Single(SubEvent),
 }
 

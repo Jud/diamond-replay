@@ -1,10 +1,11 @@
-//! Scenario compiler for game simulations.
+//! No-steal-home rule compiler.
 //!
 //! Transforms an undo-resolved event stream before feeding it to the
-//! core replay engine. The core engine stays pure with zero simulation hooks.
+//! core replay engine. The core engine stays pure with zero rule hooks.
 
 use std::collections::{HashMap, HashSet};
 
+use super::stream::{self, EventStreamRule};
 use crate::error::Result;
 use crate::event::{attr_bool, attr_str, attr_usize, BrPlayType, PlayResult, RawApiEvent};
 
@@ -23,13 +24,14 @@ use crate::event::{attr_bool, attr_str, attr_usize, BrPlayType, PlayResult, RawA
 /// score runs naturally when bases load up.
 ///
 /// Scorer corrections for diverged runners (whose chaos advance was
-/// blocked) are dropped so they don't undo the sim's auto-advance.
+/// blocked) are dropped so they don't undo the rule's auto-advance.
 /// ```
-struct SimState {
+struct NoStealHomeState {
     bases: [Option<String>; 3], // 0=1B, 1=2B, 2=3B
     outs: i32,
     balls: i32,
     strikes: i32,
+    need_switch: bool,
     diverged: HashSet<String>,
     // Lineup tracking for batter ID resolution
     away_id: String,
@@ -40,13 +42,14 @@ struct SimState {
     current_index: HashMap<String, usize>,
 }
 
-impl SimState {
+impl NoStealHomeState {
     fn new() -> Self {
         Self {
             bases: [None, None, None],
             outs: 0,
             balls: 0,
             strikes: 0,
+            need_switch: false,
             diverged: HashSet::new(),
             away_id: String::new(),
             home_id: String::new(),
@@ -63,7 +66,12 @@ impl SimState {
     }
 
     fn advance_batter(&mut self) {
-        let size = self.lineup_size.get(&self.offense).copied().unwrap_or(1).max(1);
+        let size = self
+            .lineup_size
+            .get(&self.offense)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
         let idx = self.current_index.entry(self.offense.clone()).or_insert(0);
         *idx = (*idx + 1) % size;
     }
@@ -158,231 +166,197 @@ impl SimState {
 /// # Errors
 ///
 /// Returns an error if any `event_data` fails to parse as JSON.
-#[allow(clippy::too_many_lines)]
-pub fn compile_no_steal_home(resolved: Vec<RawApiEvent>) -> Result<Vec<RawApiEvent>> {
-    let mut state = SimState::new();
-    let mut output = Vec::with_capacity(resolved.len());
+pub(super) fn compile(resolved: Vec<RawApiEvent>) -> Result<Vec<RawApiEvent>> {
+    let mut rule = NoStealHomeState::new();
+    stream::compile(resolved, &mut rule)
+}
 
-    for raw in resolved {
-        let mut ed: serde_json::Value = serde_json::from_str(&raw.event_data)?;
+impl EventStreamRule for NoStealHomeState {
+    #[allow(clippy::too_many_lines)]
+    fn apply_sub_event(&mut self, sub: serde_json::Value) -> Result<Option<serde_json::Value>> {
+        let code = attr_str(&sub, "code").unwrap_or("");
+        let null = serde_json::Value::Null;
+        let attrs = sub.get("attributes").unwrap_or(&null);
 
-        let is_transaction = ed.get("events").is_some();
-        let sub_events = if is_transaction {
-            ed.get_mut("events")
-                .and_then(|v| v.as_array_mut())
-                .map(std::mem::take)
-                .unwrap_or_default()
-        } else {
-            vec![ed.clone()]
-        };
-
-        let mut new_sub_events: Vec<serde_json::Value> = Vec::with_capacity(sub_events.len());
-        let mut need_switch = false;
-
-        for sub in sub_events {
-            let code = attr_str(&sub, "code").unwrap_or("");
-            let null = serde_json::Value::Null;
-            let attrs = sub.get("attributes").unwrap_or(&null);
-
-            match code {
-                "set_teams" => {
-                    if let (Some(away), Some(home)) = (attr_str(attrs, "awayId"), attr_str(attrs, "homeId")) {
-                        state.away_id = away.to_string();
-                        state.home_id = home.to_string();
-                        state.offense = away.to_string();
-                    }
-                    new_sub_events.push(sub);
+        let keep = match code {
+            "set_teams" => {
+                if let (Some(away), Some(home)) =
+                    (attr_str(attrs, "awayId"), attr_str(attrs, "homeId"))
+                {
+                    self.away_id = away.to_string();
+                    self.home_id = home.to_string();
+                    self.offense = away.to_string();
                 }
+                true
+            }
 
-                "fill_lineup_index" => {
-                    if let (Some(tid), Some(pid), Some(idx)) = (
-                        attr_str(attrs, "teamId"),
-                        attr_str(attrs, "playerId"),
-                        attr_usize(attrs, "index"),
-                    ) {
-                        state.lineup.insert((tid.to_string(), idx), pid.to_string());
-                        let size = state.lineup_size.entry(tid.to_string()).or_insert(0);
-                        if idx + 1 > *size {
-                            *size = idx + 1;
+            "fill_lineup_index" => {
+                if let (Some(tid), Some(pid), Some(idx)) = (
+                    attr_str(attrs, "teamId"),
+                    attr_str(attrs, "playerId"),
+                    attr_usize(attrs, "index"),
+                ) {
+                    self.lineup.insert((tid.to_string(), idx), pid.to_string());
+                    let size = self.lineup_size.entry(tid.to_string()).or_insert(0);
+                    if idx + 1 > *size {
+                        *size = idx + 1;
+                    }
+                }
+                true
+            }
+
+            "fill_lineup" => {
+                if let (Some(tid), Some(pid)) =
+                    (attr_str(attrs, "teamId"), attr_str(attrs, "playerId"))
+                {
+                    let next_idx = self.lineup_size.get(tid).copied().unwrap_or(0);
+                    self.lineup
+                        .insert((tid.to_string(), next_idx), pid.to_string());
+                    *self.lineup_size.entry(tid.to_string()).or_insert(0) = next_idx + 1;
+                }
+                true
+            }
+
+            "goto_lineup_index" => {
+                if let (Some(tid), Some(idx)) =
+                    (attr_str(attrs, "teamId"), attr_usize(attrs, "index"))
+                {
+                    self.current_index.insert(tid.to_string(), idx);
+                }
+                true
+            }
+
+            "pitch" => {
+                if attr_bool(attrs, "advancesCount", true) {
+                    let result = attr_str(attrs, "result").unwrap_or("");
+                    match result {
+                        "ball" => {
+                            self.balls += 1;
+                            if self.balls >= 4 {
+                                self.apply_walk();
+                                self.reset_count();
+                            }
                         }
-                    }
-                    new_sub_events.push(sub);
-                }
-
-                "fill_lineup" => {
-                    if let (Some(tid), Some(pid)) = (attr_str(attrs, "teamId"), attr_str(attrs, "playerId")) {
-                        let next_idx = state.lineup_size.get(tid).copied().unwrap_or(0);
-                        state.lineup.insert((tid.to_string(), next_idx), pid.to_string());
-                        *state.lineup_size.entry(tid.to_string()).or_insert(0) = next_idx + 1;
-                    }
-                    new_sub_events.push(sub);
-                }
-
-                "goto_lineup_index" => {
-                    if let (Some(tid), Some(idx)) = (attr_str(attrs, "teamId"), attr_usize(attrs, "index")) {
-                        state.current_index.insert(tid.to_string(), idx);
-                    }
-                    new_sub_events.push(sub);
-                }
-
-                "pitch" => {
-                    if attr_bool(attrs, "advancesCount", true) {
-                        let result = attr_str(attrs, "result").unwrap_or("");
-                        match result {
-                            "ball" => {
-                                state.balls += 1;
-                                if state.balls >= 4 {
-                                    state.apply_walk();
-                                    state.reset_count();
+                        "strike_swinging" | "strike_looking" => {
+                            self.strikes += 1;
+                            if self.strikes >= 3 {
+                                self.outs += 1;
+                                self.reset_count();
+                                self.advance_batter();
+                                if self.outs >= 3 {
+                                    self.need_switch = true;
                                 }
                             }
-                            "strike_swinging" | "strike_looking" => {
-                                state.strikes += 1;
-                                if state.strikes >= 3 {
-                                    state.outs += 1;
-                                    state.reset_count();
-                                    state.advance_batter();
-                                    if state.outs >= 3 {
-                                        need_switch = true;
-                                    }
-                                }
-                            }
-                            "foul" => {
-                                if state.strikes < 2 {
-                                    state.strikes += 1;
-                                }
-                            }
-                            "hit_by_pitch" => {
-                                state.apply_walk();
-                                state.reset_count();
-                            }
-                            "ball_in_play" => {
-                                state.reset_count();
-                            }
-                            _ => {}
                         }
+                        "foul" => {
+                            if self.strikes < 2 {
+                                self.strikes += 1;
+                            }
+                        }
+                        "hit_by_pitch" => {
+                            self.apply_walk();
+                            self.reset_count();
+                        }
+                        "ball_in_play" => {
+                            self.reset_count();
+                        }
+                        _ => {}
                     }
-                    new_sub_events.push(sub);
                 }
+                true
+            }
 
-                "ball_in_play" => {
-                    let pr = attr_str(attrs, "playResult").unwrap_or("");
-                    if PlayResult::parse(pr).is_batter_out() {
-                        let added = if pr == "double_play" { 2 } else { 1 };
-                        state.outs += added;
-                        state.advance_batter();
-                        if state.outs >= 3 {
-                            need_switch = true;
-                        }
-                    } else {
-                        state.apply_hit(pr); // advances batter internally
+            "ball_in_play" => {
+                let pr = attr_str(attrs, "playResult").unwrap_or("");
+                if PlayResult::parse(pr).is_batter_out() {
+                    let added = if pr == "double_play" { 2 } else { 1 };
+                    self.outs += added;
+                    self.advance_batter();
+                    if self.outs >= 3 {
+                        self.need_switch = true;
                     }
-                    new_sub_events.push(sub);
+                } else {
+                    self.apply_hit(pr);
                 }
+                true
+            }
 
-                "base_running" => {
-                    let pt = attr_str(attrs, "playType").unwrap_or("");
-                    let br_type = BrPlayType::parse(pt);
-                    let base = attr_usize(attrs, "base");
-                    let runner_id = attr_str(attrs, "runnerId").map(str::to_string);
+            "base_running" => {
+                let pt = attr_str(attrs, "playType").unwrap_or("");
+                let br_type = BrPlayType::parse(pt);
+                let base = attr_usize(attrs, "base");
+                let runner_id = attr_str(attrs, "runnerId").map(str::to_string);
 
-                    if br_type.is_chaos() {
-                        let blocked = match base {
-                            Some(4) => true, // never score on chaos
-                            Some(b @ 1..=3) => state.is_occupied(b), // block if no room
-                            _ => false,
-                        };
-                        if blocked {
-                            // Mark runner as diverged from real game state
-                            if let Some(rid) = &runner_id {
-                                state.diverged.insert(rid.clone());
-                            }
-                            continue; // drop the event
-                        }
-                        // Allowed chaos advance (destination empty): update state
-                        if let (Some(rid), Some(b)) = (&runner_id, base) {
-                            state.remove_runner(rid);
-                            state.set(b, Some(rid.clone()));
-                        }
-                        new_sub_events.push(sub);
-                        continue;
-                    }
-
-                    // Drop scorer corrections for diverged runners.
-                    // Their position in our sim differs from the real game,
-                    // so scorer corrections would undo correct auto-advances.
-                    if let Some(rid) = &runner_id {
-                        if state.diverged.contains(rid) && !br_type.is_out() {
-                            continue; // drop stale correction
-                        }
-                    }
-
-                    if br_type.is_out() {
+                if br_type.is_chaos() {
+                    let blocked = match base {
+                        Some(4) => true,
+                        Some(b @ 1..=3) => self.is_occupied(b),
+                        _ => false,
+                    };
+                    if blocked {
                         if let Some(rid) = &runner_id {
-                            state.remove_runner(rid);
-                            state.diverged.remove(rid);
+                            self.diverged.insert(rid.clone());
                         }
-                        state.outs += 1;
-                        if state.outs >= 3 {
-                            need_switch = true;
+                        false
+                    } else {
+                        if let (Some(rid), Some(b)) = (&runner_id, base) {
+                            self.remove_runner(rid);
+                            self.set(b, Some(rid.clone()));
                         }
-                        new_sub_events.push(sub);
-                        continue;
+                        true
                     }
-
-                    // Non-chaos: normal advance (ground truth correction)
+                } else if runner_id
+                    .as_ref()
+                    .is_some_and(|rid| self.diverged.contains(rid) && !br_type.is_out())
+                {
+                    false
+                } else if br_type.is_out() {
+                    if let Some(rid) = &runner_id {
+                        self.remove_runner(rid);
+                        self.diverged.remove(rid);
+                    }
+                    self.outs += 1;
+                    if self.outs >= 3 {
+                        self.need_switch = true;
+                    }
+                    true
+                } else {
                     if let (Some(rid), Some(b)) = (&runner_id, base) {
-                        state.remove_runner(rid);
+                        self.remove_runner(rid);
                         if (1..=3).contains(&b) {
-                            state.set(b, Some(rid.clone()));
+                            self.set(b, Some(rid.clone()));
                         }
                     }
-                    new_sub_events.push(sub);
-                }
-
-                "end_half" => {
-                    state.switch_half();
-                    need_switch = false;
-                    new_sub_events.push(sub);
-                }
-
-                _ => {
-                    new_sub_events.push(sub);
+                    true
                 }
             }
-        }
 
-        if need_switch {
-            state.switch_half();
-        }
-
-        // Rebuild event_data JSON
-        let new_event_data = if is_transaction {
-            if let Some(obj) = ed.as_object_mut() {
-                obj.insert("events".into(), serde_json::Value::Array(new_sub_events));
+            "end_half" => {
+                self.switch_half();
+                self.need_switch = false;
+                true
             }
-            serde_json::to_string(&ed)?
-        } else if let Some(single) = new_sub_events.into_iter().next() {
-            serde_json::to_string(&single)?
-        } else {
-            continue;
+
+            _ => true,
         };
 
-        output.push(RawApiEvent {
-            id: raw.id,
-            stream_id: raw.stream_id,
-            sequence_number: raw.sequence_number,
-            event_data: new_event_data,
-        });
+        Ok(keep.then_some(sub))
     }
 
-    Ok(output)
+    fn finish_raw_event(&mut self) -> Result<()> {
+        if self.need_switch {
+            self.switch_half();
+            self.need_switch = false;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[allow(clippy::needless_pass_by_value)]
     fn raw_single(seq: i64, sub: serde_json::Value) -> RawApiEvent {
         RawApiEvent {
             id: format!("test-{seq}"),
@@ -392,6 +366,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn raw_tx(seq: i64, subs: Vec<serde_json::Value>) -> RawApiEvent {
         let tx = serde_json::json!({"code": "transaction", "events": subs});
         RawApiEvent {
@@ -424,7 +399,7 @@ mod tests {
             raw_single(1, base_running("advanced_on_last_play", 3, "r1")),
             raw_single(2, base_running("passed_ball", 4, "r1")),
         ];
-        let result = compile_no_steal_home(events).unwrap();
+        let result = compile(events).unwrap();
         assert_eq!(result.len(), 1, "PB to home dropped");
     }
 
@@ -434,7 +409,7 @@ mod tests {
             raw_single(1, base_running("advanced_on_last_play", 1, "r1")),
             raw_single(2, base_running("passed_ball", 2, "r1")), // 2B empty, allowed
         ];
-        let result = compile_no_steal_home(events).unwrap();
+        let result = compile(events).unwrap();
         assert_eq!(result.len(), 2, "PB to empty 2B allowed");
     }
 
@@ -447,7 +422,7 @@ mod tests {
             raw_single(3, base_running("passed_ball", 4, "r2")), // blocked
             raw_single(4, base_running("passed_ball", 3, "r1")), // blocked (3B occupied)
         ];
-        let result = compile_no_steal_home(events).unwrap();
+        let result = compile(events).unwrap();
         assert_eq!(result.len(), 2, "both chaos advances blocked");
     }
 
@@ -467,7 +442,7 @@ mod tests {
             raw_single(7, pitch("ball")),
             raw_single(8, pitch("ball")),
         ];
-        let result = compile_no_steal_home(events).unwrap();
+        let result = compile(events).unwrap();
         // Event 4 (steal to home) should be dropped
         assert_eq!(result.len(), 7);
     }
@@ -480,7 +455,7 @@ mod tests {
             raw_single(3, base_running("advanced_on_last_play", 3, "r1")),
             raw_single(4, base_running("caught_stealing", 2, "r2")),
         ];
-        let result = compile_no_steal_home(events).unwrap();
+        let result = compile(events).unwrap();
         assert_eq!(result.len(), 4);
     }
 
@@ -493,7 +468,7 @@ mod tests {
             raw_single(3, base_running("advanced_on_last_play", 2, "r2")),
             raw_single(4, base_running("passed_ball", 3, "r2")), // 3B empty, allowed
         ];
-        let result = compile_no_steal_home(events).unwrap();
+        let result = compile(events).unwrap();
         assert_eq!(result.len(), 4);
     }
 
@@ -501,12 +476,15 @@ mod tests {
     fn chaos_within_transaction() {
         let events = vec![
             raw_single(1, base_running("advanced_on_last_play", 3, "r1")),
-            raw_tx(2, vec![
-                base_running("passed_ball", 4, "r1"), // blocked
-                base_running("passed_ball", 3, "r2"), // blocked (3B occupied)
-            ]),
+            raw_tx(
+                2,
+                vec![
+                    base_running("passed_ball", 4, "r1"), // blocked
+                    base_running("passed_ball", 3, "r2"), // blocked (3B occupied)
+                ],
+            ),
         ];
-        let result = compile_no_steal_home(events).unwrap();
+        let result = compile(events).unwrap();
         let ed: serde_json::Value = serde_json::from_str(&result[1].event_data).unwrap();
         let tx_events = ed["events"].as_array().unwrap();
         assert_eq!(tx_events.len(), 0, "both chaos events in tx dropped");
@@ -514,10 +492,8 @@ mod tests {
 
     #[test]
     fn sacrifice_fly_counted_as_out() {
-        let events = vec![
-            raw_tx(1, vec![bip("sacrifice_fly")]),
-        ];
-        let result = compile_no_steal_home(events).unwrap();
+        let events = vec![raw_tx(1, vec![bip("sacrifice_fly")])];
+        let result = compile(events).unwrap();
         assert_eq!(result.len(), 1);
     }
 }

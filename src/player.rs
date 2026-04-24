@@ -41,6 +41,7 @@ pub struct BattingStats {
     pub k_swinging: i32,
     pub bb: i32,
     pub hbp: i32,
+    pub ci: i32,
     pub singles: i32,
     pub doubles: i32,
     pub triples: i32,
@@ -218,6 +219,8 @@ pub struct PlayerTracker {
     player_team: HashMap<String, String>,
     /// Accumulated stats per player
     stats: HashMap<String, PlayerGameStats>,
+    /// Player run credits in scoring order, used for deterministic score corrections.
+    run_log: Vec<String>,
 }
 
 impl PlayerTracker {
@@ -230,6 +233,7 @@ impl PlayerTracker {
             current_pitcher: HashMap::new(),
             player_team: HashMap::new(),
             stats: HashMap::new(),
+            run_log: Vec::new(),
         }
     }
 
@@ -332,7 +336,7 @@ impl PlayerTracker {
         _apply_to_baserunners: bool,
     ) {
         // Replace in lineup map
-        for (key, pid) in self.lineup.iter_mut() {
+        for (key, pid) in &mut self.lineup {
             if key.0 == team_id && pid == outgoing_id {
                 *pid = incoming_id.to_string();
             }
@@ -457,6 +461,15 @@ impl PlayerTracker {
         self.advance_batter(team_id);
     }
 
+    /// Record catcher interference for the current batter.
+    pub fn record_ci(&mut self, team_id: &str) {
+        self.with_batter(team_id, |s| {
+            s.pa += 1;
+            s.ci += 1;
+        });
+        self.advance_batter(team_id);
+    }
+
     /// Record a ball-in-play result for the current batter.
     pub fn record_bip(
         &mut self,
@@ -504,11 +517,15 @@ impl PlayerTracker {
 
     pub fn record_run(&mut self, runner_id: &str) {
         self.ensure_stats(runner_id).batting.runs += 1;
+        self.run_log.push(runner_id.to_string());
     }
 
     /// Undo a previously recorded run for a runner.
     pub fn undo_run(&mut self, runner_id: &str) {
         self.ensure_stats(runner_id).batting.runs -= 1;
+        if let Some(pos) = self.run_log.iter().rposition(|id| id == runner_id) {
+            self.run_log.remove(pos);
+        }
     }
 
     pub fn record_sb(&mut self, runner_id: &str) {
@@ -693,32 +710,29 @@ impl PlayerTracker {
     }
 
     /// Remove runs from players on a team when a score override reduces the total.
-    /// Removes from the last players first (reverse insertion order approximation).
+    /// Removes from the latest recorded run credits first.
     ///
     /// # Panics
     ///
     /// Panics if a player ID found in iteration is missing from the stats map
-    /// (should never happen since the IDs are drawn from the same map).
+    /// (should never happen since the IDs are drawn from the run log).
     pub fn adjust_team_runs(&mut self, team_id: &str, delta: i32) {
         if delta >= 0 {
             return;
         }
         let mut remaining = -delta;
-        let mut ids: Vec<String> = self
-            .stats
-            .iter()
-            .filter(|(_, s)| s.team_id == team_id && s.batting.runs > 0)
-            .map(|(id, _)| id.clone())
-            .collect();
-        ids.reverse();
-        for id in ids {
-            if remaining == 0 {
+        while remaining > 0 {
+            let Some(pos) = self.run_log.iter().rposition(|id| {
+                self.stats
+                    .get(id)
+                    .is_some_and(|s| s.team_id == team_id && s.batting.runs > 0)
+            }) else {
                 break;
-            }
+            };
+            let id = self.run_log.remove(pos);
             let runs = &mut self.stats.get_mut(&id).unwrap().batting.runs;
-            let take = (*runs).min(remaining);
-            *runs -= take;
-            remaining -= take;
+            *runs -= 1;
+            remaining -= 1;
         }
     }
 

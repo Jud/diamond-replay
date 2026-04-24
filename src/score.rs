@@ -37,8 +37,8 @@ pub fn force_advance_walk_score<S: BuildHasher>(
 
 /// Perform the base-state mutations for a walk/HBP force advance.
 pub fn apply_walk_bases(bases: &mut BaseState, batter_id: Option<&str>) {
-    let snap1 = bases.get(1).clone();
-    let snap2 = bases.get(2).clone();
+    let snap1 = bases.get(1).cloned();
+    let snap2 = bases.get(2).cloned();
 
     if snap2.is_some() && snap1.is_some() {
         bases.set(3, snap2);
