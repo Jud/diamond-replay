@@ -39,6 +39,7 @@
 mod compute;
 mod error;
 mod event;
+mod lineup;
 mod options;
 mod player;
 mod replay;
