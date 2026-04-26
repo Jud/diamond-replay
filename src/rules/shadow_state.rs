@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::event::{attr_bool, attr_str, attr_usize, PlayResult};
+use crate::lineup::current_index_after_squash;
 
 pub(super) struct ShadowState {
     bases: [Option<String>; 3],
@@ -241,15 +242,7 @@ impl ShadowState {
         let new_size = size - 1;
         self.lineup_size.insert(team.clone(), new_size);
         if let Some(current_index) = self.current_index.get_mut(team_id) {
-            if new_size == 0 {
-                *current_index = 0;
-            } else if *current_index >= size {
-                *current_index %= new_size;
-            } else if *current_index > removed_index {
-                *current_index -= 1;
-            } else if *current_index >= new_size {
-                *current_index = 0;
-            }
+            *current_index = current_index_after_squash(*current_index, size, removed_index);
         }
     }
 

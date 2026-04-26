@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::event::{BipPlayType, BrPlayType, PitchResult, PlayResult};
+use crate::lineup::current_index_after_squash;
 use crate::state::PAContext;
 
 // ---------------------------------------------------------------------------
@@ -286,15 +287,7 @@ impl PlayerTracker {
         let new_size = size - 1;
         self.lineup_size.insert(team_id.to_string(), new_size);
         if let Some(idx) = self.current_index.get_mut(team_id) {
-            if new_size == 0 {
-                *idx = 0;
-            } else if *idx >= size {
-                *idx %= new_size;
-            } else if *idx > removed_index {
-                *idx -= 1;
-            } else if *idx >= new_size {
-                *idx = 0;
-            }
+            *idx = current_index_after_squash(*idx, size, removed_index);
         }
     }
 
@@ -329,14 +322,8 @@ impl PlayerTracker {
 
     /// Substitute one player for another. GC fires `sub_players` when a
     /// coach makes a substitution. The incoming player takes the outgoing
-    /// player's lineup slot, field position, and (optionally) base.
-    pub fn handle_sub_players(
-        &mut self,
-        team_id: &str,
-        outgoing_id: &str,
-        incoming_id: &str,
-        _apply_to_baserunners: bool,
-    ) {
+    /// player's lineup slot and field position.
+    pub fn handle_sub_players(&mut self, team_id: &str, outgoing_id: &str, incoming_id: &str) {
         // Replace in lineup map
         for (key, pid) in &mut self.lineup {
             if key.0 == team_id && pid == outgoing_id {
@@ -355,8 +342,6 @@ impl PlayerTracker {
                 stats.pitching = Some(PitchingStats::default());
             }
         }
-        // The apply_to_baserunners flag is returned for the caller to handle
-        // (base state lives on Replay, not PlayerTracker).
     }
 
     pub fn handle_goto(&mut self, team_id: &str, index: usize) {

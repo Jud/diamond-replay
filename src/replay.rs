@@ -86,10 +86,16 @@ struct Replay {
     pitch_pitches_since_last_bip_away: i32,
     /// Pitching-side: pitches thrown since last BIP (home team pitching)
     pitch_pitches_since_last_bip_home: i32,
-    /// Pending BIP run snapshot:
-    /// `(parity, runs_before, is_away_batting, is_real_bip)`.
-    /// `is_real_bip=false` for dropped third strikes (runs go to passive instead).
-    pending_bip_snapshot: Option<(usize, i32, bool, bool)>,
+    /// Pending BIP run snapshot.
+    /// `real_bip=false` for dropped third strikes (runs go to passive instead).
+    pending_bip_snapshot: Option<RunSnapshot>,
+}
+
+struct RunSnapshot {
+    half_parity: usize,
+    runs_before: i32,
+    away_batting: bool,
+    real_bip: bool,
 }
 
 impl Replay {
@@ -183,18 +189,17 @@ impl Replay {
     /// `runs_after` (post-correction) is the true number of runs scored.
     /// Uses the stored team identity so half-inning switches don't misattribute.
     fn resolve_bip_snapshot(&mut self) {
-        if let Some((parity, runs_before, is_away, is_real_bip)) = self.pending_bip_snapshot.take()
-        {
+        if let Some(snapshot) = self.pending_bip_snapshot.take() {
             let hi = self.hi();
-            let runs_after = team_run_total(&self.runs_by_half, hi, parity);
-            let delta = runs_after - runs_before;
+            let runs_after = team_run_total(&self.runs_by_half, hi, snapshot.half_parity);
+            let delta = runs_after - snapshot.runs_before;
             if delta > 0 {
-                let ll = if is_away {
+                let ll = if snapshot.away_batting {
                     &mut self.away_ll
                 } else {
                     &mut self.home_ll
                 };
-                if is_real_bip {
+                if snapshot.real_bip {
                     ll.runs_on_bip += delta;
                 } else {
                     // Dropped third strike — runs are passive (WP/PB/force)
@@ -772,7 +777,12 @@ fn handle_ball_in_play(r: &mut Replay, attrs: &serde_json::Value) -> bool {
 
     // Always snapshot so we can categorize any runs scored during this event.
     // For real BIP: runs go to runs_on_bip. For dropped thirds: runs_passive.
-    r.pending_bip_snapshot = Some((parity, runs_before, is_away, !is_dropped_third));
+    r.pending_bip_snapshot = Some(RunSnapshot {
+        half_parity: parity,
+        runs_before,
+        away_batting: is_away,
+        real_bip: !is_dropped_third,
+    });
 
     if !is_dropped_third {
         r.flush_pitches_between_bip();
@@ -886,6 +896,9 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     let pt = BrPlayType::parse(attr_str(attrs, "playType").unwrap_or(""));
     let base = attr_usize(attrs, "base");
     let runner_id = attr_str(attrs, "runnerId").map(String::from);
+    let runner_on_bases = runner_id
+        .as_deref()
+        .is_some_and(|rid| r.state.bases.find_by_id(rid).is_some());
 
     let hi = r.hi();
     let defense = r.defense_team().to_string();
@@ -913,26 +926,26 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     match pt {
         BrPlayType::WildPitch => {
             r.ll_for_offense().wp += 1;
-            if base == Some(4) && !pt.is_out() && runner_is_on_bases(r, runner_id.as_deref()) {
+            if base == Some(4) && !pt.is_out() && runner_on_bases {
                 r.ll_for_offense().runs_passive += 1;
             }
         }
         BrPlayType::PassedBall => {
             r.ll_for_offense().pb += 1;
-            if base == Some(4) && !pt.is_out() && runner_is_on_bases(r, runner_id.as_deref()) {
+            if base == Some(4) && !pt.is_out() && runner_on_bases {
                 r.ll_for_offense().runs_passive += 1;
             }
         }
         BrPlayType::CaughtStealing => {
             r.ll_for_offense().cs += 1;
         }
-        BrPlayType::StoleBase if base == Some(4) && runner_is_on_bases(r, runner_id.as_deref()) => {
+        BrPlayType::StoleBase if base == Some(4) && runner_on_bases => {
             // Only count if runner is actually on bases (not already auto-scored)
             r.ll_for_offense().steals_of_home += 1;
             r.ll_for_offense().runs_passive += 1;
         }
         BrPlayType::DefensiveIndifference | BrPlayType::OnSamePitch | BrPlayType::OtherAdvance
-            if base == Some(4) && !pt.is_out() && runner_is_on_bases(r, runner_id.as_deref()) =>
+            if base == Some(4) && !pt.is_out() && runner_on_bases =>
         {
             // Passive run only if runner is still on bases (not already auto-scored)
             r.ll_for_offense().runs_passive += 1;
@@ -941,7 +954,7 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             if base == Some(4)
                 && !pt.is_out()
                 && r.pending_bip_snapshot.is_none()
-                && runner_is_on_bases(r, runner_id.as_deref()) =>
+                && runner_on_bases =>
         {
             // BIP run — only count if runner is still on bases (not already
             // auto-scored) AND there's no pending BIP snapshot (which would
@@ -978,10 +991,9 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
 
     if let (Some(b), Some(ref rid)) = (base, &runner_id) {
         let occupant = Some(BaseOccupant::Player(rid.clone()));
-        let on_bases = r.state.bases.find_by_id(rid).is_some();
 
         if pt == BrPlayType::RemainedOnLastPlay && (1..=3).contains(&b) {
-            if on_bases {
+            if runner_on_bases {
                 update_remained(&mut r.state, b, rid);
             } else {
                 if was_auto_scored(&r.state, rid) {
@@ -1000,7 +1012,7 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
                 r.state.bases.set(b, occupant);
             }
         } else if b == 4 {
-            if on_bases {
+            if runner_on_bases {
                 r.state.bases.clear_runner(rid, b);
                 score::score_run(hi, &mut r.runs_by_half);
                 r.players.record_run(rid);
@@ -1012,7 +1024,7 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
             }
             // Not on bases: already auto-scored — skip (confirmation only)
         } else if (1..=3).contains(&b) {
-            if on_bases {
+            if runner_on_bases {
                 r.state.bases.clear_by_id(rid);
             } else if was_auto_scored(&r.state, rid) {
                 undo_auto_scored_run(r, rid);
@@ -1023,10 +1035,6 @@ fn handle_base_running(r: &mut Replay, attrs: &serde_json::Value) -> bool {
         }
     }
     false
-}
-
-fn runner_is_on_bases(r: &Replay, runner_id: Option<&str>) -> bool {
-    runner_id.is_some_and(|rid| r.state.bases.find_by_id(rid).is_some())
 }
 
 /// Runner didn't move -- update tracking from anonymous to their real ID.
@@ -1548,7 +1556,7 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                         attr_str(&evt.attributes, "incomingPlayerId"),
                     ) {
                         let apply_br = attr_bool(&evt.attributes, "applyToBaserunners", false);
-                        r.players.handle_sub_players(tid, out_id, in_id, apply_br);
+                        r.players.handle_sub_players(tid, out_id, in_id);
                         if apply_br {
                             r.state.bases.substitute_runner(out_id, in_id);
                             if r.state.error_runners.remove(out_id) {
