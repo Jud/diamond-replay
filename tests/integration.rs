@@ -171,6 +171,18 @@ game_test!(
     "10U_Mariners_Brewers_Apr12"
 );
 
+// Linescore source: /public/game-stream-processing/organizations/{event_id}/linescore
+game_test!(
+    test_10u_braves_cardinals_apr25,
+    "10U_Braves_Cardinals_Apr25.json",
+    "10U_Braves_Cardinals_Apr25"
+);
+game_test!(
+    test_13u_cardinals_braves_apr25,
+    "13U_Cardinals_Braves_Apr25.json",
+    "13U_Cardinals_Braves_Apr25"
+);
+
 /// Regression: auto-scored runners must not be double-counted when the
 /// confirming base_running event arrives in a later transaction.
 #[test]
@@ -438,6 +450,14 @@ ll_balance_test!(test_ll_balance_stars_tigers, "stars_vs_tigers_mar31.json");
 ll_balance_test!(
     test_ll_balance_mariners_tigers_apr1,
     "mariners_vs_tigers_apr1.json"
+);
+ll_balance_test!(
+    test_ll_balance_braves_cardinals_apr25,
+    "10U_Braves_Cardinals_Apr25.json"
+);
+ll_balance_test!(
+    test_ll_balance_cardinals_braves_apr25,
+    "13U_Cardinals_Braves_Apr25.json"
 );
 
 // ---------------------------------------------------------------------------

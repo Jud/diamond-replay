@@ -83,6 +83,7 @@ pub enum PlayResult {
     FieldersChoice,
     Error,
     DroppedThirdStrike,
+    OtherOut,
     Unknown,
 }
 
@@ -108,6 +109,7 @@ impl PlayResult {
             "fielders_choice" => Self::FieldersChoice,
             "error" => Self::Error,
             "dropped_third_strike" => Self::DroppedThirdStrike,
+            "other_out" => Self::OtherOut,
             _ => Self::Unknown,
         }
     }
@@ -127,6 +129,7 @@ impl PlayResult {
                 | Self::LineOut
                 | Self::PopOut
                 | Self::DoublPlay
+                | Self::OtherOut
         )
     }
 

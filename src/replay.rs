@@ -457,6 +457,41 @@ fn record_walk_run(r: &mut Replay, hi: usize, defense: &str) {
     }
 }
 
+/// Apply a balk: all existing runners advance one base; a runner on 3B scores.
+fn handle_balk(r: &mut Replay) {
+    let hi = r.hi();
+    let defense = r.defense_team().to_string();
+    r.track_hi();
+
+    let runner_3b = match r.state.bases.get(3) {
+        Some(BaseOccupant::Player(id)) => Some(id.clone()),
+        _ => None,
+    };
+
+    if r.state.bases.is_occupied(3) {
+        score::score_run(hi, &mut r.runs_by_half);
+        if let Some(ref pid) = runner_3b {
+            r.players.record_run(pid);
+            if !r.state.error_runners.contains(pid) {
+                r.players.record_pitch_earned_run(&defense);
+            }
+            r.state.error_runners.remove(pid);
+        } else {
+            r.players.record_pitch_earned_run(&defense);
+        }
+        r.players.record_pitch_run(&defense);
+        r.ll_for_offense().runs_passive += 1;
+        r.state.bases.set(3, None);
+    }
+
+    if r.state.bases.is_occupied(2) {
+        r.state.bases.advance(2, 3);
+    }
+    if r.state.bases.is_occupied(1) {
+        r.state.bases.advance(1, 2);
+    }
+}
+
 /// Why the batter reached base without putting the ball in play.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReachCause {
@@ -1523,6 +1558,10 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                 "base_running" => handle_base_running(&mut r, &evt.attributes),
                 "end_at_bat" => {
                     handle_end_at_bat(&mut r, &evt.attributes);
+                    false
+                }
+                "balk" => {
+                    handle_balk(&mut r);
                     false
                 }
                 "end_half" => true,
