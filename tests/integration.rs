@@ -704,10 +704,8 @@ fn hbp_book(prefix_events: Vec<serde_json::Value>) -> String {
             serde_json::json!({"code": "fill_position", "attributes": {"teamId": "home", "playerId": "p1", "position": "P"}}),
         ),
     ];
-    let mut seq = 5;
-    for ed in prefix_events {
+    for (seq, ed) in (5..).zip(prefix_events) {
         events.push(raw_event(seq, ed));
-        seq += 1;
     }
     serde_json::to_string(&events).unwrap()
 }
