@@ -564,7 +564,8 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     r.track_hi();
 
     // Track PA context
-    if r.state.pa_context.pitches_in_pa == 0 {
+    let first_pitch_of_plate_appearance = r.state.pa_context.pitches_in_pa == 0;
+    if first_pitch_of_plate_appearance {
         let is_strike = matches!(
             result,
             PitchResult::StrikeSwinging
@@ -580,7 +581,8 @@ fn handle_pitch(r: &mut Replay, attrs: &serde_json::Value) -> bool {
     }
 
     // Record pitch for pitcher stats
-    r.players.record_pitch_thrown(&defense, result);
+    r.players
+        .record_pitch_thrown(&defense, result, first_pitch_of_plate_appearance);
 
     // Track pitches between BIP for Little League stats
     r.inc_pitches_since_last_bip();
@@ -1550,7 +1552,20 @@ pub fn replay_game(resolved: &[RawApiEvent]) -> Result<GameResult> {
                         if r.first_pitch_ts.is_none() {
                             r.first_pitch_ts = Some(ts);
                         }
-                        r.last_pitch_ts = Some(ts);
+                        // Guard against late-edit events: if a pitch arrives more than
+                        // 60 min after the previous pitch ts, treat it as a post-game
+                        // scorebook edit and don't extend the game's duration window.
+                        // Real games (incl. rain delays) virtually never have a single
+                        // gap longer than this; coaches reopening the app to fix a
+                        // missed AB hours later commonly do.
+                        const LATE_EDIT_THRESHOLD_MS: i64 = 60 * 60 * 1000;
+                        let extend = match r.last_pitch_ts {
+                            Some(prev) => (ts - prev).abs() < LATE_EDIT_THRESHOLD_MS,
+                            None => true,
+                        };
+                        if extend {
+                            r.last_pitch_ts = Some(ts);
+                        }
                     }
                     handle_pitch(&mut r, &evt.attributes)
                 }

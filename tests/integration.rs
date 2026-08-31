@@ -183,6 +183,23 @@ game_test!(
     "13U_Cardinals_Braves_Apr25"
 );
 
+/// Regression: a pitch event with a createdAt > 60 min after the previous pitch
+/// is treated as a post-game scorebook edit, not a real pitch — it must not
+/// extend duration_min. This Cubs game has one such edit at 4:40 PM (game ended
+/// at 1:25 PM) which previously made duration report ~278 min instead of ~82.
+#[test]
+fn test_late_edit_pitch_does_not_extend_duration() {
+    let json = include_str!("../testdata/McCabe_Tigers_Cubs_Apr18.json");
+    let result = replay_from_json(json).expect("replay should succeed");
+    let first = result.first_pitch_timestamp.expect("first pitch ts");
+    let last = result.last_pitch_timestamp.expect("last pitch ts");
+    let duration_min = (last - first) as f64 / 1000.0 / 60.0;
+    assert!(
+        duration_min < 150.0,
+        "duration {duration_min:.1} min suggests a late-edit pitch leaked into the window"
+    );
+}
+
 /// Regression: auto-scored runners must not be double-counted when the
 /// confirming base_running event arrives in a later transaction.
 #[test]
