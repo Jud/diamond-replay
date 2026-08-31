@@ -37,6 +37,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod compute;
+mod edits;
 mod error;
 mod event;
 mod lineup;
@@ -76,6 +77,7 @@ pub fn replay_with_options(
     options: ReplayOptions,
 ) -> Result<GameResult> {
     let resolved = undo::resolve_undos(raw_events);
+    let resolved = edits::resolve_edits(resolved);
     let compiled = rules::compile_events(resolved, options.rule_set)?;
     replay::replay_game(&compiled)
 }

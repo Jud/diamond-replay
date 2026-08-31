@@ -183,6 +183,23 @@ game_test!(
     "13U_Cardinals_Braves_Apr25"
 );
 
+/// Regression: a pitch event with a createdAt > 60 min after the previous pitch
+/// is treated as a post-game scorebook edit, not a real pitch — it must not
+/// extend duration_min. This Cubs game has one such edit at 4:40 PM (game ended
+/// at 1:25 PM) which previously made duration report ~278 min instead of ~82.
+#[test]
+fn test_late_edit_pitch_does_not_extend_duration() {
+    let json = include_str!("../testdata/McCabe_Tigers_Cubs_Apr18.json");
+    let result = replay_from_json(json).expect("replay should succeed");
+    let first = result.first_pitch_timestamp.expect("first pitch ts");
+    let last = result.last_pitch_timestamp.expect("last pitch ts");
+    let duration_min = (last - first) as f64 / 1000.0 / 60.0;
+    assert!(
+        duration_min < 150.0,
+        "duration {duration_min:.1} min suggests a late-edit pitch leaked into the window"
+    );
+}
+
 /// Regression: auto-scored runners must not be double-counted when the
 /// confirming base_running event arrives in a later transaction.
 #[test]
@@ -523,4 +540,249 @@ fn test_no_steal_home_reduces_runs() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Scorebook edit semantics (edit_group / delete) + HBP pitch crediting.
+//
+// The edited_pitching_change fixtures are sanitized real books (see
+// testdata/sanitize.py): every identifier remapped, timestamps rebased.
+// Expected values are the provider's own aggregation of the same books
+// (boxscore endpoint), mapped through the same id remapping.
+// ---------------------------------------------------------------------------
+
+fn pitching_line(result: &diamond_replay::GameResult, id: &str) -> (i32, i32, i32, i32) {
+    let p = result.player_stats[id]
+        .pitching
+        .as_ref()
+        .unwrap_or_else(|| panic!("no pitching stats for {id}"));
+    (p.pitches, p.bf, p.k, p.outs_recorded)
+}
+
+/// One retroactive edit_group moves the relief pitcher's entry back to the
+/// start of the 4th inning; two delete events remove pitcher_decision
+/// sub-events. The game also contains hit-by-pitch deliveries (pseudo-pitch
+/// with advancesCount:false + end_at_bat), which the provider counts as
+/// pitches.
+#[test]
+fn test_edited_book_applies_retroactive_pitching_change() {
+    let json = include_str!("../testdata/edited_pitching_change_a.json");
+    let result = replay_from_json(json).expect("replay should succeed");
+
+    // Home: starter through 3 innings, relief owns the 4th (39 pitches —
+    // only ~5 without the edit applied).
+    let starter = "1f315c05-8447-fbf6-5546-6b8161b17f48";
+    let relief = "c7c80170-24ff-ee21-c15b-a35e5bf2aa77";
+    assert_eq!(pitching_line(&result, starter), (53, 16, 6, 9));
+    assert_eq!(pitching_line(&result, relief), (39, 10, 0, 3));
+
+    // Away (no edits; one HBP delivery counted): provider says 45/9 + 66/15.
+    assert_eq!(
+        pitching_line(&result, "95098a11-2c59-a169-1774-69ecbced2a22"),
+        (45, 9, 2, 3)
+    );
+    assert_eq!(
+        pitching_line(&result, "fd870307-7cd3-a2da-66c2-7d84393efaa5"),
+        (66, 15, 6, 9)
+    );
+
+    // Team aggregates must include the HBP deliveries (3 home, 1 away) and
+    // agree with the per-player bags.
+    assert_eq!(result.home_pitching.pitches, 92);
+    assert_eq!(result.away_pitching.pitches, 111);
+
+    // Team totals include the HBP deliveries (3 home, 1 away).
+    let team_total = |team: &str| -> i32 {
+        result
+            .player_stats
+            .values()
+            .filter(|p| p.team_id == team && p.pitching.is_some())
+            .map(|p| p.pitching.as_ref().unwrap().pitches)
+            .sum()
+    };
+    assert_eq!(team_total(&result.home_id), 92);
+    assert_eq!(team_total(&result.away_id), 111);
+}
+
+/// Two retroactive edit_groups: every pitching change in this book was
+/// recorded after the fact. Without edit resolution the starter is credited
+/// with all 120 pitches; the provider splits 46 / 53 / 21.
+#[test]
+fn test_edited_book_applies_two_retroactive_changes() {
+    let json = include_str!("../testdata/edited_pitching_change_b.json");
+    let result = replay_from_json(json).expect("replay should succeed");
+
+    assert_eq!(
+        pitching_line(&result, "65418bc3-6f9e-3a4e-dc60-b215b1ea0a52"),
+        (46, 10, 6, 6)
+    );
+    assert_eq!(
+        pitching_line(&result, "46d8113a-0e9a-343c-6a36-05600228078b"),
+        (53, 10, 7, 7)
+    );
+    assert_eq!(
+        pitching_line(&result, "81167c7d-d20c-a05c-0d0b-59527212a45c"),
+        (21, 4, 1, 1)
+    );
+}
+
+/// Control book: no edit events, no HBPs. Numbers must match the provider
+/// exactly and stay identical to the pre-edit-resolution engine.
+#[test]
+fn test_clean_control_game_regression() {
+    let json = include_str!("../testdata/clean_control_game.json");
+    let result = replay_from_json(json).expect("replay should succeed");
+
+    for (id, pitches, bf) in [
+        ("7c008c5f-c33a-ab0c-89f0-be23589271ea", 72, 16),
+        ("183df196-7eae-f8fa-88a7-113a1fe16944", 22, 6),
+        ("d7cca6e7-018a-cb9f-dc4c-ab273e46ebb5", 21, 5),
+        ("089fc3ec-2891-5903-f347-34b640bdb546", 47, 10),
+        ("c64e1919-0038-0eb3-6945-7a05ae36e49f", 74, 15),
+    ] {
+        let line = pitching_line(&result, id);
+        assert_eq!((line.0, line.1), (pitches, bf), "pitcher {id}");
+    }
+}
+
+/// Both public entrypoints must run edit resolution — neither the standard
+/// nor the options-based path may bypass it.
+#[test]
+fn test_edit_resolution_applies_through_both_entrypoints() {
+    let json = include_str!("../testdata/edited_pitching_change_a.json");
+    let relief = "c7c80170-24ff-ee21-c15b-a35e5bf2aa77";
+
+    let standard = replay_from_json(json).expect("standard replay");
+    assert_eq!(
+        standard.player_stats[relief]
+            .pitching
+            .as_ref()
+            .unwrap()
+            .pitches,
+        39
+    );
+
+    let simulated = replay_from_json_no_steal_home(json).expect("options replay");
+    assert_eq!(
+        simulated.player_stats[relief]
+            .pitching
+            .as_ref()
+            .unwrap()
+            .pitches,
+        39
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HBP pitch crediting: synthetic books.
+// ---------------------------------------------------------------------------
+
+fn hbp_book(prefix_events: Vec<serde_json::Value>) -> String {
+    fn raw_event(seq: i64, event_data: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("row-{seq}"),
+            "stream_id": "test",
+            "sequence_number": seq,
+            "event_data": event_data.to_string(),
+        })
+    }
+    let mut events = vec![
+        raw_event(
+            1,
+            serde_json::json!({"code": "set_teams", "attributes": {"awayId": "away", "homeId": "home"}}),
+        ),
+        raw_event(
+            2,
+            serde_json::json!({"code": "fill_lineup_index", "attributes": {"teamId": "away", "playerId": "b1", "index": 0}}),
+        ),
+        raw_event(
+            3,
+            serde_json::json!({"code": "fill_lineup_index", "attributes": {"teamId": "away", "playerId": "b2", "index": 1}}),
+        ),
+        raw_event(
+            4,
+            serde_json::json!({"code": "fill_position", "attributes": {"teamId": "home", "playerId": "p1", "position": "P"}}),
+        ),
+    ];
+    let mut seq = 5;
+    for ed in prefix_events {
+        events.push(raw_event(seq, ed));
+        seq += 1;
+    }
+    serde_json::to_string(&events).unwrap()
+}
+
+fn pitch_ball() -> serde_json::Value {
+    serde_json::json!({"code": "pitch", "attributes": {"result": "ball", "advancesCount": true}})
+}
+
+/// The provider encodes an HBP as a pseudo-pitch (advancesCount:false)
+/// plus end_at_bat in one transaction.
+fn hbp_transaction() -> serde_json::Value {
+    serde_json::json!({"code": "transaction", "events": [
+        {"code": "pitch", "attributes": {"result": "ball", "advancesCount": false, "advancesRunners": false}},
+        {"code": "end_at_bat", "attributes": {"reason": "hit_by_pitch", "intentional": false}},
+    ]})
+}
+
+/// HBP after n prior pitches: batter sees exactly n + 1 pitches, the
+/// pitcher's count includes the HBP delivery, and ball/strike buckets are
+/// untouched by it.
+#[test]
+fn test_hbp_delivery_counts_one_pitch() {
+    let json = hbp_book(vec![pitch_ball(), pitch_ball(), hbp_transaction()]);
+    let result = replay_from_json(&json).expect("replay should succeed");
+
+    let batter = &result.player_stats["b1"];
+    assert_eq!(batter.batting.pitches_seen, 3);
+    assert_eq!(batter.batting.hbp, 1);
+
+    let pitcher = result.player_stats["p1"].pitching.as_ref().unwrap();
+    assert_eq!(pitcher.pitches, 3);
+    assert_eq!(pitcher.balls, 2, "HBP delivery must not count as a ball");
+    assert_eq!(pitcher.strikes_swinging, 0);
+    assert_eq!(pitcher.strikes_looking, 0);
+    assert_eq!(pitcher.fouls, 0);
+    assert_eq!(pitcher.bf, 1);
+}
+
+/// A first-delivery HBP to a later batter starts that batter's
+/// final_batter_start_pitch_count exactly like a first pitch would.
+#[test]
+fn test_first_delivery_hbp_sets_final_batter_start() {
+    // Batter 1 walks on four pitches; batter 2 is hit by the first delivery.
+    let json = hbp_book(vec![
+        pitch_ball(),
+        pitch_ball(),
+        pitch_ball(),
+        pitch_ball(),
+        hbp_transaction(),
+    ]);
+    let result = replay_from_json(&json).expect("replay should succeed");
+
+    let pitcher = result.player_stats["p1"].pitching.as_ref().unwrap();
+    assert_eq!(pitcher.pitches, 5);
+    assert_eq!(pitcher.final_batter_start_pitch_count, Some(5));
+}
+
+/// A pitching change immediately before an HBP: the incoming pitcher owns
+/// the HBP delivery and starts their rest count at it.
+#[test]
+fn test_hbp_after_mid_pa_pitching_change() {
+    let json = hbp_book(vec![
+        pitch_ball(),
+        pitch_ball(),
+        serde_json::json!({"code": "fill_position", "attributes": {"teamId": "home", "playerId": "p2", "position": "P"}}),
+        hbp_transaction(),
+    ]);
+    let result = replay_from_json(&json).expect("replay should succeed");
+
+    let starter = result.player_stats["p1"].pitching.as_ref().unwrap();
+    assert_eq!(starter.pitches, 2);
+    let incoming = result.player_stats["p2"].pitching.as_ref().unwrap();
+    assert_eq!(incoming.pitches, 1);
+    assert_eq!(incoming.final_batter_start_pitch_count, Some(1));
+
+    let batter = &result.player_stats["b1"];
+    assert_eq!(batter.batting.pitches_seen, 3);
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::event::{BipPlayType, BrPlayType, PitchResult, PlayResult};
 use crate::lineup::current_index_after_squash;
@@ -120,6 +120,12 @@ pub struct BattingStats {
 pub struct PitchingStats {
     // Raw counts
     pub pitches: i32,
+    /// One-based pitch number of the first pitch thrown to this pitcher's
+    /// final batter. Leagues can use this instead of `pitches` when their
+    /// rest policy lets a pitcher finish the batter without entering a
+    /// higher rest tier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_batter_start_pitch_count: Option<i32>,
     pub balls: i32,
     pub strikes_swinging: i32,
     pub strikes_looking: i32,
@@ -216,6 +222,9 @@ pub struct PlayerTracker {
     current_index: HashMap<String, usize>,
     /// Current pitcher per team
     current_pitcher: HashMap<String, String>,
+    /// Pitchers whose next counted pitch begins their current stint. This
+    /// covers a pitching change made in the middle of a plate appearance.
+    pitcher_needs_batter_start: HashSet<String>,
     /// Maps player to team.
     player_team: HashMap<String, String>,
     /// Accumulated stats per player
@@ -232,6 +241,7 @@ impl PlayerTracker {
             lineup_size: HashMap::new(),
             current_index: HashMap::new(),
             current_pitcher: HashMap::new(),
+            pitcher_needs_batter_start: HashSet::new(),
             player_team: HashMap::new(),
             stats: HashMap::new(),
             run_log: Vec::new(),
@@ -260,8 +270,16 @@ impl PlayerTracker {
         self.player_team
             .insert(player_id.to_string(), team_id.to_string());
         if position == "P" {
+            let pitcher_changed = self
+                .current_pitcher
+                .get(team_id)
+                .is_none_or(|current| current != player_id);
             self.current_pitcher
                 .insert(team_id.to_string(), player_id.to_string());
+            if pitcher_changed {
+                self.pitcher_needs_batter_start
+                    .insert(player_id.to_string());
+            }
             // Ensure pitcher has PitchingStats initialized
             let stats = self.ensure_stats(player_id);
             if stats.pitching.is_none() {
@@ -337,6 +355,8 @@ impl PlayerTracker {
         if self.current_pitcher.get(team_id).map(String::as_str) == Some(outgoing_id) {
             self.current_pitcher
                 .insert(team_id.to_string(), incoming_id.to_string());
+            self.pitcher_needs_batter_start
+                .insert(incoming_id.to_string());
             let stats = self.ensure_stats(incoming_id);
             if stats.pitching.is_none() {
                 stats.pitching = Some(PitchingStats::default());
@@ -588,17 +608,30 @@ impl PlayerTracker {
     }
 
     /// Record a pitch thrown by the defense team's pitcher.
-    pub fn record_pitch_thrown(&mut self, defense_team: &str, result: PitchResult) {
-        self.with_pitcher(defense_team, |p| {
-            p.pitches += 1;
-            match result {
-                PitchResult::Ball => p.balls += 1,
-                PitchResult::StrikeSwinging => p.strikes_swinging += 1,
-                PitchResult::StrikeLooking => p.strikes_looking += 1,
-                PitchResult::Foul => p.fouls += 1,
-                PitchResult::BallInPlay | PitchResult::HitByPitch | PitchResult::Unknown => {}
-            }
-        });
+    pub fn record_pitch_thrown(
+        &mut self,
+        defense_team: &str,
+        result: PitchResult,
+        first_pitch_of_plate_appearance: bool,
+    ) {
+        let pitcher_id = self
+            .current_pitcher(defense_team)
+            .map_or_else(|| format!("__anon_pitcher_{defense_team}"), str::to_string);
+        let begins_batter =
+            first_pitch_of_plate_appearance || self.pitcher_needs_batter_start.remove(&pitcher_id);
+        let stats = self.ensure_stats_for_team(&pitcher_id, defense_team);
+        let pitching = stats.pitching.get_or_insert_with(PitchingStats::default);
+        if begins_batter || pitching.pitches == 0 {
+            pitching.final_batter_start_pitch_count = Some(pitching.pitches + 1);
+        }
+        pitching.pitches += 1;
+        match result {
+            PitchResult::Ball => pitching.balls += 1,
+            PitchResult::StrikeSwinging => pitching.strikes_swinging += 1,
+            PitchResult::StrikeLooking => pitching.strikes_looking += 1,
+            PitchResult::Foul => pitching.fouls += 1,
+            PitchResult::BallInPlay | PitchResult::HitByPitch | PitchResult::Unknown => {}
+        }
     }
 
     /// Record a K by the pitcher.
@@ -750,6 +783,7 @@ impl Default for PlayerTracker {
 #[cfg(test)]
 mod tests {
     use super::PlayerTracker;
+    use crate::event::PitchResult;
 
     #[test]
     fn squash_lineup_keeps_shifted_last_batter_due() {
@@ -775,5 +809,38 @@ mod tests {
         players.handle_squash_lineup("away", 2);
 
         assert_eq!(players.current_batter("away"), Some("batter-0"));
+    }
+
+    #[test]
+    fn records_one_based_start_count_for_pitchers_final_batter() {
+        let mut players = PlayerTracker::new();
+        players.handle_fill_position("home", "pitcher-1", "P");
+
+        players.record_pitch_thrown("home", PitchResult::Ball, true);
+        players.record_pitch_thrown("home", PitchResult::Foul, false);
+        players.record_pitch_thrown("home", PitchResult::StrikeLooking, false);
+        players.record_pitch_thrown("home", PitchResult::Ball, true);
+        players.record_pitch_thrown("home", PitchResult::StrikeSwinging, false);
+
+        let stats = players.into_stats();
+        let pitching = stats["pitcher-1"].pitching.as_ref().unwrap();
+        assert_eq!(pitching.pitches, 5);
+        assert_eq!(pitching.final_batter_start_pitch_count, Some(4));
+    }
+
+    #[test]
+    fn pitching_change_mid_batter_starts_new_pitchers_rest_count() {
+        let mut players = PlayerTracker::new();
+        players.handle_fill_position("home", "pitcher-1", "P");
+        players.record_pitch_thrown("home", PitchResult::Ball, true);
+        players.record_pitch_thrown("home", PitchResult::Ball, false);
+
+        players.handle_fill_position("home", "pitcher-2", "P");
+        players.record_pitch_thrown("home", PitchResult::StrikeLooking, false);
+
+        let stats = players.into_stats();
+        let pitching = stats["pitcher-2"].pitching.as_ref().unwrap();
+        assert_eq!(pitching.pitches, 1);
+        assert_eq!(pitching.final_batter_start_pitch_count, Some(1));
     }
 }
