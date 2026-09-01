@@ -1366,6 +1366,8 @@ fn dump_json(result: &GameResult, game_name: &str, include_ll: bool) {
         "home_pitching": result.home_pitching,
         "away_pitching": result.away_pitching,
         "player_stats": result.player_stats,
+        "home_little_league": result.home_little_league,
+        "away_little_league": result.away_little_league,
         "transition_gaps": result.transition_gaps,
         "dead_time_per_inning": result.dead_time_per_inning,
         "first_timestamp": result.first_timestamp,
